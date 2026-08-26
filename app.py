@@ -3,6 +3,7 @@ import tensorflow as tf
 import numpy as np
 from PIL import Image
 import cv2
+import matplotlib
 import matplotlib.cm as cm
 import os
 import json
@@ -129,7 +130,7 @@ def make_gradcam_overlay(image_np, grad_model, pred_index):
     heatmap = heatmap.numpy()
     heatmap_resized = cv2.resize(heatmap, IMG_SIZE)
     heatmap_uint8 = np.uint8(255 * heatmap_resized)
-    jet = cm.get_cmap("jet")
+    jet = matplotlib.colormaps["jet"]
     jet_colors = jet(np.arange(256))[:, :3]
     jet_heatmap = (jet_colors[heatmap_uint8] * 255).astype(np.uint8)
     return cv2.addWeighted(img_resized, 0.6, jet_heatmap, 0.4, 0)
