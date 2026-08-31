@@ -77,6 +77,38 @@ def load_model():
         st.stop()
     return tf.keras.models.load_model(MODEL_PATH)
 
+# ---------------- NEW: AUTO-CROP TO LEAF ----------------
+def crop_to_leaf(image_np, padding=20):
+    """Finds the largest leaf-colored region and crops to it, removing background clutter."""
+    hsv = cv2.cvtColor(image_np, cv2.COLOR_RGB2HSV)
+    lower_leaf = np.array([10, 30, 20])
+    upper_leaf = np.array([90, 255, 255])
+    leaf_mask = cv2.inRange(hsv, lower_leaf, upper_leaf)
+
+    kernel = np.ones((7, 7), np.uint8)
+    leaf_mask = cv2.morphologyEx(leaf_mask, cv2.MORPH_CLOSE, kernel)
+    leaf_mask = cv2.morphologyEx(leaf_mask, cv2.MORPH_OPEN, kernel)
+
+    contours, _ = cv2.findContours(leaf_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return image_np, False  # no leaf detected, use original
+
+    largest = max(contours, key=cv2.contourArea)
+    if cv2.contourArea(largest) < 500:  # too small, likely noise
+        return image_np, False
+
+    x, y, w, h = cv2.boundingRect(largest)
+    H, W = image_np.shape[:2]
+    x0 = max(0, x - padding)
+    y0 = max(0, y - padding)
+    x1 = min(W, x + w + padding)
+    y1 = min(H, y + h + padding)
+
+    cropped = image_np[y0:y1, x0:x1]
+    if cropped.size == 0:
+        return image_np, False
+    return cropped, True
+
 def segment_leaf_and_disease(image_np):
     hsv = cv2.cvtColor(image_np, cv2.COLOR_RGB2HSV)
     lower_leaf = np.array([10, 30, 20])
@@ -163,9 +195,12 @@ uploaded_file = st.file_uploader("Upload a leaf image", type=["jpg", "jpeg", "pn
 
 if uploaded_file is not None:
     image = Image.open(uploaded_file).convert("RGB")
-    image_np = np.array(image)
+    image_np_original = np.array(image)
 
     with st.spinner("Analyzing..."):
+        # NEW STEP: auto-crop to leaf region before anything else
+        image_np, was_cropped = crop_to_leaf(image_np_original)
+
         img_resized = cv2.resize(image_np, IMG_SIZE)
         img_array = np.expand_dims(img_resized / 255.0, axis=0)
         predictions = model.predict(img_array, verbose=0)[0]
@@ -195,13 +230,19 @@ if uploaded_file is not None:
         save_to_history(img_resized, severity_overlay, gradcam_overlay, result)
 
     st.subheader("Latest Result")
-    col1, col2, col3 = st.columns(3)
+
+    if was_cropped:
+        st.caption("The image below was automatically cropped to focus on the leaf before analysis.")
+
+    col1, col2, col3, col4 = st.columns(4)
     with col1:
-        st.image(image, caption="Original Image", use_container_width=True)
+        st.image(image, caption="Original Upload", use_container_width=True)
     with col2:
-        st.image(severity_overlay, caption="Diseased Region Highlighted", use_container_width=True)
+        st.image(image_np, caption="Cropped to Leaf" if was_cropped else "No Crop Applied", use_container_width=True)
     with col3:
-        st.image(gradcam_overlay, caption="Grad-CAM (Model Focus Area)", use_container_width=True)
+        st.image(severity_overlay, caption="Diseased Region", use_container_width=True)
+    with col4:
+        st.image(gradcam_overlay, caption="Grad-CAM Focus", use_container_width=True)
 
     st.markdown("---")
     result_col1, result_col2 = st.columns(2)
@@ -210,6 +251,9 @@ if uploaded_file is not None:
         st.metric("Confidence", f"{confidence:.1f}%")
     with result_col2:
         st.metric("Severity", f"{severity_percent:.1f}%", sev_label)
+
+    if confidence < 60:
+        st.warning("⚠️ Low confidence prediction. For better accuracy, try a closer, well-lit photo of a single leaf against a plain background.")
 
     if "Healthy" in predicted_class:
         st.success(f"✅ {recommendation}")
