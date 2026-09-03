@@ -139,13 +139,26 @@ def make_severity_overlay(image_np, disease_mask):
 
 def build_gradcam_model(model, input_shape=(224, 224, 3)):
     inputs = tf.keras.Input(shape=input_shape)
-    x = inputs
-    conv_output = None
-    for layer in model.layers:
-        x = layer(x)
-        if isinstance(layer, tf.keras.layers.Conv2D):
-            conv_output = x
-    return tf.keras.Model(inputs=inputs, outputs=[conv_output, x])
+    first_layer = model.layers[0]
+
+    if hasattr(first_layer, 'layers'):
+        # Transfer-learning model (e.g. MobileNetV2): the base model's own
+        # output IS already the last conv feature map (since include_top=False)
+        base_output = first_layer(inputs)
+        conv_output = base_output
+        y = base_output
+        for layer in model.layers[1:]:
+            y = layer(y)
+        return tf.keras.Model(inputs=inputs, outputs=[conv_output, y])
+    else:
+        # Custom CNN: find the last Conv2D layer manually
+        x = inputs
+        conv_output = None
+        for layer in model.layers:
+            x = layer(x)
+            if isinstance(layer, tf.keras.layers.Conv2D):
+                conv_output = x
+        return tf.keras.Model(inputs=inputs, outputs=[conv_output, x])
 
 def make_gradcam_overlay(image_np, grad_model, pred_index):
     img_resized = cv2.resize(image_np, IMG_SIZE)
