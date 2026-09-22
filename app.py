@@ -10,7 +10,7 @@ import json
 from datetime import datetime
 
 # ---------------- CONFIG ----------------
-MODEL_PATH = "model_mobilenet_v4.h5"
+MODEL_PATH = "model_mobilenet_v6.h5"
 IMG_SIZE = (224, 224)
 HISTORY_DIR = "history"
 CLASS_NAMES = ["Pepper Bacterial Spot", "Pepper Healthy", "Potato Early Blight",
