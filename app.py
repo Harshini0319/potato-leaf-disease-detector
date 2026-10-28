@@ -10,16 +10,39 @@ import json
 from datetime import datetime
 
 
-# ---------------- INPUT VALIDATION: REJECT NON-LEAF IMAGES ----------------
+# ---------------- INPUT VALIDATION: LEAF VS NON-LEAF ----------------
+# This extra ImageNet classifier helps reject obvious unrelated objects
+# (people, animals, buses, bags, buildings, etc.) before disease prediction.
+# It is a general-purpose object classifier, not a dedicated leaf detector;
+# test carefully with the leaf photos used in your project.
+from tensorflow.keras.applications import MobileNetV2 as ImageNetMobileNetV2
+from tensorflow.keras.applications.mobilenet_v2 import preprocess_input, decode_predictions
+
+@st.cache_resource
+def load_input_validator():
+    # Downloads ImageNet weights on first run if they are not cached.
+    return ImageNetMobileNetV2(weights="imagenet", include_top=True)
+
+# ImageNet labels that are commonly botanical / plant-like. This is deliberately
+# broad to reduce false rejection of leaves, but cannot guarantee perfect detection.
+PLANT_LABEL_KEYWORDS = (
+    "leaf", "plant", "pot", "bell pepper", "cabbage", "cauliflower",
+    "broccoli", "artichoke", "cardoon", "corn", "ear", "rapeseed",
+    "daisy", "flower", "fungus", "mushroom", "acorn", "buckeye",
+    "cucumber", "zucchini", "spaghetti squash", "butternut squash",
+    "pumpkin", "strawberry", "fig", "pineapple", "banana", "lemon",
+    "orange", "granny smith", "head cabbage", "greenhouse"
+)
+
 def validate_leaf_image(image_np):
-    """Heuristic input guard. Returns (accepted, reason); not a perfect leaf detector."""
+    """Return (accepted, reason). General ImageNet screening + color sanity check."""
     if image_np is None or image_np.size == 0:
         return False, "The image could not be read. Please upload a JPG or PNG leaf photo."
     h, w = image_np.shape[:2]
     if h < 80 or w < 80:
         return False, "The image is too small. Please upload a clearer leaf photo."
 
-    # Reject obvious frontal human faces before running the disease classifier.
+    # First reject obvious human faces.
     gray = cv2.cvtColor(image_np, cv2.COLOR_RGB2GRAY)
     try:
         cascade_path = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
@@ -33,6 +56,27 @@ def validate_leaf_image(image_np):
     except Exception:
         pass
 
+    # Classify the whole image with ImageNet before passing it to the disease model.
+    # If its top predictions are clearly unrelated to plants, reject it.
+    try:
+        validator = load_input_validator()
+        small = cv2.resize(image_np, (224, 224)).astype(np.float32)
+        batch = np.expand_dims(small, axis=0)
+        scores = validator.predict(preprocess_input(batch), verbose=0)
+        top_labels = [label.lower().replace("_", " ") for _, label, _ in decode_predictions(scores, top=5)[0]]
+        if not any(any(keyword in label for keyword in PLANT_LABEL_KEYWORDS) for label in top_labels):
+            return False, (
+                "This image does not appear to contain a plant or leaf. "
+                "Please upload a clear potato, tomato, or pepper leaf photo."
+            )
+    except Exception as exc:
+        # Do not silently claim reliable non-leaf detection if the validator cannot run.
+        return False, (
+            "The image validation model could not run. Please try again after the app "
+            "finishes loading, or contact the project administrator."
+        )
+
+    # Retain a basic color/region check as a second sanity check.
     hsv = cv2.cvtColor(image_np, cv2.COLOR_RGB2HSV)
     green_mask = cv2.inRange(
         hsv, np.array([20, 25, 25], dtype=np.uint8),
