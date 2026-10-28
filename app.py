@@ -56,97 +56,90 @@ def _label_matches(label, phrases):
     )
 
 def validate_leaf_image(image_np):
-    """Return (accepted, reason) before disease prediction."""
+    """Reject obvious non-leaf inputs before any disease model is run.
+
+    This is a practical screening gate, not a perfect crop-species verifier.
+    A dedicated trained validator is required to reliably separate all leaf species.
+    """
     if image_np is None or image_np.size == 0:
-        return False, "Image could not be read. Upload a clear potato, tomato, or pepper leaf photo."
+        return False, "Image could not be read. Upload a potato, tomato, or bell pepper leaf."
 
     h, w = image_np.shape[:2]
     if h < 80 or w < 80:
-        return False, "Image is too small. Upload a clearer potato, tomato, or pepper leaf photo."
+        return False, "Image is too small. Upload a clear potato, tomato, or bell pepper leaf photo."
 
-    # Reject human faces BEFORE disease prediction. Run several OpenCV cascades
-    # at a normalized resolution; the previous w//10 minimum missed small faces
-    # in portrait uploads and screenshots.
+    # 1) Face screening. Run multiple cascades on original and enlarged versions.
+    # Do not require a minimum face/image area ratio: faces in full-body photos
+    # must also cause rejection.
     try:
-        gray = cv2.cvtColor(image_np, cv2.COLOR_RGB2GRAY)
-        max_dim = max(gray.shape[:2])
-        if max_dim < 900:
-            scale = 900.0 / max_dim
-            gray = cv2.resize(
-                gray, (int(gray.shape[1] * scale), int(gray.shape[0] * scale)),
-                interpolation=cv2.INTER_CUBIC
-            )
-        gray = cv2.equalizeHist(gray)
-        face_cascade_files = (
+        gray0 = cv2.cvtColor(image_np, cv2.COLOR_RGB2GRAY)
+        cascade_names = (
             "haarcascade_frontalface_default.xml",
+            "haarcascade_frontalface_alt.xml",
             "haarcascade_frontalface_alt2.xml",
+            "haarcascade_profileface.xml",
         )
-        for cascade_file in face_cascade_files:
-            cascade = cv2.CascadeClassifier(cv2.data.haarcascades + cascade_file)
-            if cascade.empty():
-                continue
-            faces = cascade.detectMultiScale(
-                gray, scaleFactor=1.05, minNeighbors=4,
-                minSize=(28, 28), flags=cv2.CASCADE_SCALE_IMAGE
-            )
-            # Reject when a plausible face occupies a meaningful image region.
-            if any((fw * fh) / float(gray.shape[0] * gray.shape[1]) >= 0.003
-                   for (_, _, fw, fh) in faces):
-                return False, "Not a Leaf Image — a human face was detected. Upload a potato, tomato, or pepper leaf only."
-
-        # Profile faces can be missed by frontal cascades; check both orientations.
-        profile = cv2.CascadeClassifier(
-            cv2.data.haarcascades + "haarcascade_profileface.xml"
-        )
-        if not profile.empty():
-            for view in (gray, cv2.flip(gray, 1)):
-                faces = profile.detectMultiScale(
-                    view, scaleFactor=1.05, minNeighbors=4, minSize=(32, 32),
-                    flags=cv2.CASCADE_SCALE_IMAGE
-                )
-                if any((fw * fh) / float(view.shape[0] * view.shape[1]) >= 0.004
-                       for (_, _, fw, fh) in faces):
-                    return False, "Not a Leaf Image — a human face was detected. Upload a potato, tomato, or pepper leaf only."
+        scales = [gray0]
+        max_dim = max(gray0.shape)
+        if max_dim < 1400:
+            factor = min(1400.0 / max_dim, 3.0)
+            scales.append(cv2.resize(gray0, (int(w * factor), int(h * factor)), interpolation=cv2.INTER_CUBIC))
+        for gray in scales:
+            gray = cv2.equalizeHist(gray)
+            for cascade_name in cascade_names:
+                cascade = cv2.CascadeClassifier(cv2.data.haarcascades + cascade_name)
+                if cascade.empty():
+                    continue
+                for view in (gray, cv2.flip(gray, 1)) if "profileface" in cascade_name else (gray,):
+                    faces = cascade.detectMultiScale(
+                        view, scaleFactor=1.05, minNeighbors=3,
+                        minSize=(24, 24), flags=cv2.CASCADE_SCALE_IMAGE
+                    )
+                    if len(faces) > 0:
+                        return False, "Not a Leaf Image — a human face was detected. Upload only potato, tomato, or bell pepper leaves."
     except Exception:
-        # If face checks fail, continue to the independent image-classifier gate.
+        # Continue to the independent classifier screen if OpenCV face detection fails.
         pass
 
+    # 2) ImageNet screen for recognizable people, animals, vehicles, and objects.
+    # This model is not trained specifically for leaf validation, so this screen
+    # supplements face detection rather than being treated as a guarantee.
     try:
         validator = load_input_validator()
         resized = cv2.resize(image_np, (224, 224)).astype(np.float32)
-        probs = validator.predict(
-            preprocess_input(np.expand_dims(resized, axis=0)), verbose=0
-        )
-        labels = [
-            (label.lower().replace("_", " "), float(score))
-            for _, label, score in decode_predictions(probs, top=5)[0]
-        ]
+        probs = validator.predict(preprocess_input(np.expand_dims(resized, axis=0)), verbose=0)
+        decoded = decode_predictions(probs, top=5)[0]
+        labels = [(label.lower().replace("_", " "), float(score)) for _, label, score in decoded]
 
-        # Strong non-plant predictions should never reach the disease classifier.
+        # Expanded list catches common ImageNet labels for people/clothing and objects too.
+        non_target_labels = NON_TARGET_LABELS + (
+            "suit", "gown", "jersey", "sweatshirt", "cardigan", "wig", "mask",
+            "beard", "sunglasses", "neck brace", "lab coat", "uniform", "bow tie",
+            "microphone", "stage", "tie", "trench coat", "vestment", "cloak",
+            "stethoscope", "handbag", "wallet", "umbrella", "safety pin", "syringe",
+            "guitar", "drum", "sports car", "racer", "jeep", "minibus", "moped",
+            "streetcar", "forklift", "lawn mower", "plow", "vacuum", "screen", "monitor"
+        )
         top_label, top_score = labels[0]
-        if top_score >= 0.08 and _label_matches(top_label, NON_TARGET_LABELS):
-            return False, "Not a Leaf Image — person, animal, vehicle, or object detected."
+        if top_score >= 0.08 and _label_matches(top_label, non_target_labels):
+            return False, "Not a Leaf Image — the image appears to contain a person, animal, vehicle, or object."
+        for label, score in labels[1:]:
+            if score >= 0.15 and _label_matches(label, non_target_labels):
+                return False, "Not a Leaf Image — the image appears to contain a person, animal, vehicle, or object."
 
-        for label, score in labels[:3]:
-            if score >= 0.12 and _label_matches(label, NON_TARGET_LABELS):
-                return False, "Not a Leaf Image — this appears to be an unrelated object or animal."
-
-        # Reject clearly identified alternative plant classes.
+        # Reject other recognizable plants/crops such as banana, corn, and flowers.
         for label, score in labels:
-            if score >= 0.08 and _label_matches(label, OTHER_PLANT_LABELS) and not _label_matches(label, TARGET_LABELS):
-                return False, "Not a Leaf Image — only potato, tomato, and pepper leaves are supported."
+            if score >= 0.08 and _label_matches(label, OTHER_PLANT_LABELS):
+                return False, "Not a Supported Leaf — upload only potato, tomato, or bell pepper leaves. Other plant leaves are not supported."
 
-        # Do not demand ImageNet to name the exact crop: it often cannot name leaf photos.
-        # Basic visual sanity check to reduce obviously unsuitable inputs.
+        # 3) Basic plant-colour sanity check; this is only a secondary filter.
         hsv = cv2.cvtColor(image_np, cv2.COLOR_RGB2HSV)
-        plant_mask = cv2.inRange(
-            hsv, np.array([8, 18, 15], np.uint8), np.array([100, 255, 255], np.uint8)
-        )
+        plant_mask = cv2.inRange(hsv, np.array([8, 18, 15], np.uint8), np.array([100, 255, 255], np.uint8))
         plant_ratio = float(np.count_nonzero(plant_mask)) / float(h * w)
         if plant_ratio < 0.02:
-            return False, "Not a Leaf Image — upload a clear, close-up crop leaf photo."
+            return False, "Not a Leaf Image — upload a clear potato, tomato, or bell pepper leaf photo."
     except Exception:
-        return False, "Input validation could not run. No disease prediction was made; please retry."
+        return False, "Input validation could not run, so no disease prediction was made. Please retry."
 
     return True, ""
 
