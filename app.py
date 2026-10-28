@@ -9,6 +9,51 @@ import os
 import json
 from datetime import datetime
 
+
+# ---------------- INPUT VALIDATION: REJECT NON-LEAF IMAGES ----------------
+def validate_leaf_image(image_np):
+    """Heuristic input guard. Returns (accepted, reason); not a perfect leaf detector."""
+    if image_np is None or image_np.size == 0:
+        return False, "The image could not be read. Please upload a JPG or PNG leaf photo."
+    h, w = image_np.shape[:2]
+    if h < 80 or w < 80:
+        return False, "The image is too small. Please upload a clearer leaf photo."
+
+    # Reject obvious frontal human faces before running the disease classifier.
+    gray = cv2.cvtColor(image_np, cv2.COLOR_RGB2GRAY)
+    try:
+        cascade_path = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+        face_cascade = cv2.CascadeClassifier(cascade_path)
+        faces = face_cascade.detectMultiScale(
+            gray, scaleFactor=1.1, minNeighbors=5,
+            minSize=(max(35, w // 10), max(35, h // 10))
+        )
+        if len(faces) > 0:
+            return False, "A human face was detected. Please upload a potato, tomato, or pepper leaf image."
+    except Exception:
+        pass
+
+    hsv = cv2.cvtColor(image_np, cv2.COLOR_RGB2HSV)
+    green_mask = cv2.inRange(
+        hsv, np.array([20, 25, 25], dtype=np.uint8),
+        np.array([100, 255, 255], dtype=np.uint8)
+    )
+    kernel = np.ones((5, 5), np.uint8)
+    green_mask = cv2.morphologyEx(green_mask, cv2.MORPH_CLOSE, kernel)
+    green_mask = cv2.morphologyEx(green_mask, cv2.MORPH_OPEN, kernel)
+    green_ratio = float(np.count_nonzero(green_mask)) / float(h * w)
+    contours, _ = cv2.findContours(green_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    largest_ratio = (
+        float(cv2.contourArea(max(contours, key=cv2.contourArea))) / float(h * w)
+        if contours else 0.0
+    )
+    if green_ratio < 0.025 or largest_ratio < 0.015:
+        return False, (
+            "A plant-leaf region could not be identified confidently. Please upload a close, "
+            "well-lit photo of one potato, tomato, or pepper leaf against a simple background."
+        )
+    return True, ""
+
 # ---------------- CONFIG ----------------
 MODEL_PATH = "model_mobilenet_v6.h5"
 IMG_SIZE = (224, 224)
@@ -207,11 +252,23 @@ grad_model = build_gradcam_model(model)
 uploaded_file = st.file_uploader("Upload a leaf image", type=["jpg", "jpeg", "png"])
 
 if uploaded_file is not None:
-    image = Image.open(uploaded_file).convert("RGB")
-    image_np_original = np.array(image)
+    try:
+        image = Image.open(uploaded_file).convert("RGB")
+        image_np_original = np.array(image)
+    except Exception:
+        st.error("The uploaded file is not a valid image. Please upload a JPG or PNG leaf photo.")
+        st.stop()
 
-    with st.spinner("Analyzing..."):
-        # NEW STEP: auto-crop to leaf region before anything else
+    # Validate the image BEFORE the disease classifier runs.
+    is_leaf, validation_message = validate_leaf_image(image_np_original)
+    if not is_leaf:
+        st.error("🚫 Not a Leaf Image")
+        st.warning(validation_message)
+        st.info("Please upload a clear potato, tomato, or pepper leaf image. No disease prediction, severity, or Grad-CAM was generated.")
+        st.stop()
+
+    with st.spinner("Analyzing leaf image..."):
+        # Auto-crop only after the input passes validation.
         image_np, was_cropped = crop_to_leaf(image_np_original)
 
         img_resized = cv2.resize(image_np, IMG_SIZE)
