@@ -105,10 +105,6 @@ HISTORY_DIR = "history"
 CLASS_NAMES = ["Pepper Bacterial Spot", "Pepper Healthy", "Potato Early Blight",
                "Potato Healthy", "Potato Late Blight", "Tomato Early Blight",
                "Tomato Healthy", "Tomato Late Blight"]
-# Predictions below this threshold are treated as uncertain, not as a reliable diagnosis.
-# This reduces overconfident-looking advice, but does not repair a model trained with
-# incorrect class ordering or insufficient data.
-CONFIDENCE_THRESHOLD = 60.0
 
 RECOMMENDATIONS = {
     "Pepper Bacterial Spot": {
@@ -322,43 +318,38 @@ if uploaded_file is not None:
         img_resized = cv2.resize(image_np, IMG_SIZE)
         img_array = np.expand_dims(img_resized / 255.0, axis=0)
         predictions = model.predict(img_array, verbose=0)[0]
+
+        # The model's eight outputs are disease classes, NOT crop percentages.
+        # Keep the model's highest-scoring class as the tentative diagnosis.
         pred_index = int(np.argmax(predictions))
         predicted_class = CLASS_NAMES[pred_index]
         confidence = float(predictions[pred_index]) * 100
-        top_indices = np.argsort(predictions)[::-1][:3]
-        top_predictions = [
-            (CLASS_NAMES[int(i)], float(predictions[int(i)]) * 100)
-            for i in top_indices
-        ]
-        prediction_is_reliable = confidence >= CONFIDENCE_THRESHOLD
+        crop_name = predicted_class.split()[0]  # Potato / Tomato / Pepper
+        is_healthy = "Healthy" in predicted_class
 
-        if "Healthy" not in predicted_class:
+        if not is_healthy:
             leaf_mask, disease_mask, severity_percent = segment_leaf_and_disease(image_np)
             sev_label = severity_label(severity_percent)
-            severity_overlay = make_severity_overlay(cv2.resize(image_np, IMG_SIZE), cv2.resize(disease_mask, IMG_SIZE))
+            severity_overlay = make_severity_overlay(
+                cv2.resize(image_np, IMG_SIZE),
+                cv2.resize(disease_mask, IMG_SIZE)
+            )
         else:
             severity_percent = 0.0
-            sev_label = "Very Mild"
+            sev_label = "No visible disease detected"
             severity_overlay = img_resized
 
         gradcam_overlay = make_gradcam_overlay(image_np, grad_model, pred_index)
-        if prediction_is_reliable:
-            recommendation = RECOMMENDATIONS[predicted_class][sev_label]
-        else:
-            recommendation = (
-                "No treatment recommendation shown because the model confidence is below "
-                f"{CONFIDENCE_THRESHOLD:.0f}%. Retake a clear, close-up photo and verify the "
-                "crop and disease with a reliable source."
-            )
+        # Healthy classes use the "Very Mild" key in the existing recommendations.
+        recommendation = RECOMMENDATIONS[predicted_class][
+            "Very Mild" if is_healthy else sev_label
+        ]
 
         result = {
             "predicted_class": predicted_class,
+            "crop": crop_name,
+            "health_status": "Healthy" if is_healthy else "Disease detected",
             "confidence": round(confidence, 1),
-            "top_predictions": [
-                {"class": name, "confidence": round(score, 1)}
-                for name, score in top_predictions
-            ],
-            "prediction_status": "tentative" if not prediction_is_reliable else "model_prediction",
             "severity_percent": round(severity_percent, 1),
             "severity_label": sev_label,
             "recommendation": recommendation
@@ -381,32 +372,43 @@ if uploaded_file is not None:
         st.image(gradcam_overlay, caption="Grad-CAM Focus", use_container_width=True)
 
     st.markdown("---")
-    result_col1, result_col2 = st.columns(2)
-    with result_col1:
-        st.metric("Model's top prediction", predicted_class)
-        st.metric("Confidence", f"{confidence:.1f}%")
-    with result_col2:
-        if prediction_is_reliable:
-            st.metric("Estimated severity", f"{severity_percent:.1f}%", sev_label)
-        else:
-            st.metric("Estimated severity", "Not reported", "Prediction uncertain")
+    st.subheader("🌱 Crop and Health Assessment")
 
-    st.subheader("Top 3 model predictions")
-    for class_name, class_score in top_predictions:
-        st.write(f"- **{class_name}** — {class_score:.1f}%")
+    info_col1, info_col2, info_col3 = st.columns(3)
+    with info_col1:
+        st.metric("Detected Crop", crop_name)
+    with info_col2:
+        st.metric("Health Status", "Healthy" if is_healthy else "Disease detected")
+    with info_col3:
+        st.metric("Model Confidence", f"{confidence:.1f}%")
 
-    if not prediction_is_reliable:
-        st.warning(
-            f"⚠️ Uncertain result: the top prediction is only {confidence:.1f}% "
-            f"(required threshold: {CONFIDENCE_THRESHOLD:.0f}%). Do not rely on this as a "
-            "confirmed disease or crop identification. No treatment advice is provided."
-        )
-    elif "Healthy" in predicted_class:
-        st.success(f"✅ {recommendation}")
-    elif sev_label in ["Very Mild", "Mild"]:
-        st.warning(f"⚠️ {recommendation}")
+    st.markdown(f"**Model's predicted class:** {predicted_class}")
+
+    if is_healthy:
+        st.success("No disease was predicted by the model. Specific disease treatment is not indicated by this result.")
+        st.markdown("**Care advice:** Continue regular watering, suitable nutrition, and routine monitoring. Recheck if symptoms appear.")
+        st.metric("Estimated affected area", "0.0%")
     else:
-        st.error(f"🚨 {recommendation}")
+        st.metric("Estimated affected area (HSV-based)", f"{severity_percent:.1f}%", sev_label)
+        st.markdown("**Suggested next steps / treatment guidance**")
+        st.write(recommendation)
+        st.caption(
+            "The affected-area percentage is a rough color-based estimate, not a laboratory measurement "
+            "or a validated disease-severity score. Confirm the diagnosis before applying chemicals."
+        )
+
+    if confidence < 60:
+        st.warning(
+            f"⚠️ This result is uncertain (model confidence {confidence:.1f}%). "
+            "The crop or disease may be misidentified. Treat the label and any disease-specific advice "
+            "as provisional; compare with a clear leaf photo or confirm with an agriculture expert."
+        )
+    else:
+        st.info("Confidence is the model's score for its selected class; it does not guarantee the diagnosis is correct.")
+
+    if not is_healthy:
+        st.markdown("**Important:** Follow the product label and local agricultural guidance before using any pesticide.")
+
 
 st.markdown("---")
 st.subheader("📁 Upload History")
