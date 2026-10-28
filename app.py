@@ -64,20 +64,51 @@ def validate_leaf_image(image_np):
     if h < 80 or w < 80:
         return False, "Image is too small. Upload a clearer potato, tomato, or pepper leaf photo."
 
-    # Reject many obvious frontal human faces.
-    gray = cv2.cvtColor(image_np, cv2.COLOR_RGB2GRAY)
+    # Reject human faces BEFORE disease prediction. Run several OpenCV cascades
+    # at a normalized resolution; the previous w//10 minimum missed small faces
+    # in portrait uploads and screenshots.
     try:
-        cascade = cv2.CascadeClassifier(
-            cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
-        )
-        if not cascade.empty():
-            faces = cascade.detectMultiScale(
-                gray, scaleFactor=1.1, minNeighbors=5,
-                minSize=(max(35, w // 10), max(35, h // 10))
+        gray = cv2.cvtColor(image_np, cv2.COLOR_RGB2GRAY)
+        max_dim = max(gray.shape[:2])
+        if max_dim < 900:
+            scale = 900.0 / max_dim
+            gray = cv2.resize(
+                gray, (int(gray.shape[1] * scale), int(gray.shape[0] * scale)),
+                interpolation=cv2.INTER_CUBIC
             )
-            if len(faces):
-                return False, "Not a Leaf Image — human face detected."
+        gray = cv2.equalizeHist(gray)
+        face_cascade_files = (
+            "haarcascade_frontalface_default.xml",
+            "haarcascade_frontalface_alt2.xml",
+        )
+        for cascade_file in face_cascade_files:
+            cascade = cv2.CascadeClassifier(cv2.data.haarcascades + cascade_file)
+            if cascade.empty():
+                continue
+            faces = cascade.detectMultiScale(
+                gray, scaleFactor=1.05, minNeighbors=4,
+                minSize=(28, 28), flags=cv2.CASCADE_SCALE_IMAGE
+            )
+            # Reject when a plausible face occupies a meaningful image region.
+            if any((fw * fh) / float(gray.shape[0] * gray.shape[1]) >= 0.003
+                   for (_, _, fw, fh) in faces):
+                return False, "Not a Leaf Image — a human face was detected. Upload a potato, tomato, or pepper leaf only."
+
+        # Profile faces can be missed by frontal cascades; check both orientations.
+        profile = cv2.CascadeClassifier(
+            cv2.data.haarcascades + "haarcascade_profileface.xml"
+        )
+        if not profile.empty():
+            for view in (gray, cv2.flip(gray, 1)):
+                faces = profile.detectMultiScale(
+                    view, scaleFactor=1.05, minNeighbors=4, minSize=(32, 32),
+                    flags=cv2.CASCADE_SCALE_IMAGE
+                )
+                if any((fw * fh) / float(view.shape[0] * view.shape[1]) >= 0.004
+                       for (_, _, fw, fh) in faces):
+                    return False, "Not a Leaf Image — a human face was detected. Upload a potato, tomato, or pepper leaf only."
     except Exception:
+        # If face checks fail, continue to the independent image-classifier gate.
         pass
 
     try:
@@ -93,11 +124,11 @@ def validate_leaf_image(image_np):
 
         # Strong non-plant predictions should never reach the disease classifier.
         top_label, top_score = labels[0]
-        if top_score >= 0.12 and _label_matches(top_label, NON_TARGET_LABELS):
+        if top_score >= 0.08 and _label_matches(top_label, NON_TARGET_LABELS):
             return False, "Not a Leaf Image — person, animal, vehicle, or object detected."
 
         for label, score in labels[:3]:
-            if score >= 0.20 and _label_matches(label, NON_TARGET_LABELS):
+            if score >= 0.12 and _label_matches(label, NON_TARGET_LABELS):
                 return False, "Not a Leaf Image — this appears to be an unrelated object or animal."
 
         # Reject clearly identified alternative plant classes.
