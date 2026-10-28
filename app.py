@@ -10,8 +10,10 @@ import json
 from datetime import datetime
 
 
-# ---------------- INPUT VALIDATION: LEAF VS NON-LEAF ----------------
-# This is a guard against obvious non-plant inputs, not a perfect botanical detector.
+# ---------------- STRICT INPUT VALIDATION: TARGET CROPS ONLY ----------------
+# ImageNet is a general-purpose classifier, not a dedicated crop-leaf detector.
+# This conservative filter may reject valid leaves. For reliable species-level validation,
+# train a dedicated validator with target leaves, other leaves, and non-leaf images.
 from tensorflow.keras.applications import MobileNetV2 as ImageNetMobileNetV2
 from tensorflow.keras.applications.mobilenet_v2 import preprocess_input, decode_predictions
 import re
@@ -20,36 +22,37 @@ import re
 def load_input_validator():
     return ImageNetMobileNetV2(weights="imagenet", include_top=True)
 
-# Use complete phrases/word boundaries; avoid overly broad fragments such as "ear" or "pot".
-PLANT_LABEL_KEYWORDS = (
-    "leaf", "plant", "bell pepper", "cabbage", "cauliflower", "broccoli",
-    "artichoke", "cardoon", "corn", "rapeseed", "daisy", "flower",
-    "mushroom", "acorn", "buckeye", "cucumber", "zucchini", "squash",
-    "pumpkin", "strawberry", "fig", "pineapple", "banana", "lemon",
-    "orange", "granny smith", "head cabbage", "greenhouse", "pot"
-)
-
-NON_PLANT_LABEL_KEYWORDS = (
-    "person", "man", "woman", "boy", "girl", "face", "jersey", "sweatshirt",
-    "suit", "tie", "shirt", "dog", "cat", "bird", "horse", "snake", "lizard",
-    "turtle", "frog", "bear", "lion", "tiger", "elephant", "monkey", "car",
-    "bus", "truck", "bicycle", "motorcycle", "airplane", "boat", "building",
-    "computer", "keyboard", "phone", "chair", "sofa", "bottle", "cup", "bag",
-    "backpack", "shoe", "clock", "book", "ball", "toy"
+TARGET_CROP_LABELS = ("potato", "tomato", "bell pepper", "sweet pepper", "capsicum")
+NON_TARGET_LABELS = (
+    "person", "man", "woman", "boy", "girl", "face", "red panda", "panda",
+    "lynx", "cat", "dog", "fox", "wolf", "tiger", "lion", "bear", "monkey",
+    "baboon", "gorilla", "chimpanzee", "elephant", "horse", "zebra", "cow",
+    "sheep", "goat", "deer", "antelope", "rabbit", "hare", "squirrel",
+    "raccoon", "skunk", "otter", "badger", "weasel", "hamster", "mouse",
+    "rat", "bird", "eagle", "owl", "parrot", "penguin", "snake", "lizard",
+    "turtle", "frog", "toad", "fish", "shark", "whale", "dolphin",
+    "car", "bus", "truck", "bicycle", "motorcycle", "airplane", "boat",
+    "building", "computer", "keyboard", "phone", "chair", "sofa", "bottle",
+    "cup", "bag", "backpack", "shoe", "clock", "book", "ball", "toy"
 )
 
 def _has_phrase(label, phrases):
     label = label.lower().replace("_", " ").replace(",", " ")
-    return any(re.search(r"(?<![a-z])" + re.escape(p) + r"(?![a-z])", label) for p in phrases)
+    return any(
+        re.search(r"(?<![a-z])" + re.escape(p) + r"(?![a-z])", label)
+        for p in phrases
+    )
 
 def validate_leaf_image(image_np):
-    """Return (accepted, reason); reject obvious people/animals/objects before disease prediction."""
+    """Return (accepted, reason). Conservative screen for the three target crops."""
     if image_np is None or image_np.size == 0:
-        return False, "The image could not be read. Please upload a JPG or PNG leaf photo."
+        return False, "The image could not be read. Upload a JPG or PNG photo of a potato, tomato, or pepper leaf."
+
     h, w = image_np.shape[:2]
     if h < 80 or w < 80:
-        return False, "The image is too small. Please upload a clearer leaf photo."
+        return False, "The image is too small. Upload a clearer potato, tomato, or pepper leaf photo."
 
+    # Reject obvious frontal faces.
     gray = cv2.cvtColor(image_np, cv2.COLOR_RGB2GRAY)
     try:
         cascade_path = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
@@ -60,39 +63,54 @@ def validate_leaf_image(image_np):
                 minSize=(max(30, w // 12), max(30, h // 12))
             )
             if len(faces) > 0:
-                return False, "A human face was detected. Please upload a potato, tomato, or pepper leaf photo."
+                return False, "Human image detected. Only potato, tomato, or pepper leaf photos are supported."
     except Exception:
-        # ImageNet screening below remains active if the face detector is unavailable.
         pass
 
-    # ImageNet is only a secondary screen. Do not use its labels as the disease model.
+    # Screen with ImageNet before calling the disease classifier.
     try:
         validator = load_input_validator()
         small = cv2.resize(image_np, (224, 224)).astype(np.float32)
-        scores = validator.predict(preprocess_input(np.expand_dims(small, axis=0)), verbose=0)
+        scores = validator.predict(
+            preprocess_input(np.expand_dims(small, axis=0)), verbose=0
+        )
         decoded = decode_predictions(scores, top=5)[0]
-        labels_and_scores = [(label.lower().replace("_", " "), float(score)) for _, label, score in decoded]
+        labels_and_scores = [
+            (label.lower().replace("_", " "), float(score))
+            for _, label, score in decoded
+        ]
         top_label, top_score = labels_and_scores[0]
-        has_plant_label = any(_has_phrase(label, PLANT_LABEL_KEYWORDS) for label, _ in labels_and_scores)
-        # Strong top-1 human/animal/object evidence should stop disease inference.
-        if top_score >= 0.18 and _has_phrase(top_label, NON_PLANT_LABEL_KEYWORDS) and not _has_phrase(top_label, PLANT_LABEL_KEYWORDS):
-            return False, "This appears to be a person, animal, or unrelated object. Please upload a potato, tomato, or pepper leaf photo."
-        # If the classifier finds no plant-like label, require a substantial green region too.
-        if not has_plant_label:
-            hsv_check = cv2.cvtColor(image_np, cv2.COLOR_RGB2HSV)
-            green = cv2.inRange(hsv_check, np.array([20, 25, 25], np.uint8), np.array([100, 255, 255], np.uint8))
-            green_ratio = float(np.count_nonzero(green)) / float(h * w)
-            if green_ratio < 0.08:
-                return False, "This image does not appear to contain a plant leaf. Please upload a clear potato, tomato, or pepper leaf photo."
-    except Exception:
-        return False, "Image validation could not run, so this image was not sent to the disease classifier. Please try again."
 
-    # Color sanity check is deliberately modest so yellow/brown diseased leaves are not rejected.
+        # Reject strong animal/person/object predictions even when grass is in the background.
+        if top_score >= 0.10 and _has_phrase(top_label, NON_TARGET_LABELS):
+            return False, "This appears to be an animal, person, or unrelated object. Only potato, tomato, or pepper leaf photos are supported."
+
+        # Strictly require a target-crop label in the top predictions.
+        target_found = any(
+            _has_phrase(label, TARGET_CROP_LABELS) and score >= 0.03
+            for label, score in labels_and_scores
+        )
+        if not target_found:
+            return False, (
+                "We could not verify this as a potato, tomato, or pepper leaf. "
+                "Other plant leaves and unrelated images are not supported. "
+                "Try a clear, close-up photo of a single leaf."
+            )
+    except Exception:
+        return False, (
+            "Image validation could not run, so the disease model was not used. "
+            "Please retry after the app finishes loading."
+        )
+
+    # Basic color sanity check; diseased leaves may be yellow/brown.
     hsv = cv2.cvtColor(image_np, cv2.COLOR_RGB2HSV)
-    plant_mask = cv2.inRange(hsv, np.array([10, 20, 20], np.uint8), np.array([100, 255, 255], np.uint8))
+    plant_mask = cv2.inRange(
+        hsv, np.array([8, 15, 15], np.uint8), np.array([100, 255, 255], np.uint8)
+    )
     plant_ratio = float(np.count_nonzero(plant_mask)) / float(h * w)
-    if plant_ratio < 0.025 and not any(_has_phrase(label, PLANT_LABEL_KEYWORDS) for label, _ in labels_and_scores):
-        return False, "A plant-leaf region could not be identified confidently. Please upload a clear leaf photo."
+    if plant_ratio < 0.01:
+        return False, "A leaf region could not be identified. Upload a clear potato, tomato, or pepper leaf photo."
+
     return True, ""
 
 # ---------------- CONFIG ----------------
@@ -350,7 +368,7 @@ if uploaded_file is not None:
     st.subheader("Latest Result")
 
     if was_cropped:
-        st.caption("The image below was automatically cropped to focus on the leaf before analysis.")
+        st.caption("The image passed the input checks and is shown below for analysis.")
 
     col1, col2, col3, col4 = st.columns(4)
     with col1:
