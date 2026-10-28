@@ -251,7 +251,7 @@ if uploaded_file is not None:
     with col1:
         st.image(image, caption="Original Upload", use_container_width=True)
     with col2:
-        st.image(image_np, caption="Cropped to Leaf" if was_cropped else "No Crop Applied", use_container_width=True)
+        st.image(image_np, caption="Original Image (No Crop Applied)", use_container_width=True)
     with col3:
         st.image(severity_overlay, caption="Diseased Region", use_container_width=True)
     with col4:
