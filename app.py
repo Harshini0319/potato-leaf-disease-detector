@@ -105,6 +105,10 @@ HISTORY_DIR = "history"
 CLASS_NAMES = ["Pepper Bacterial Spot", "Pepper Healthy", "Potato Early Blight",
                "Potato Healthy", "Potato Late Blight", "Tomato Early Blight",
                "Tomato Healthy", "Tomato Late Blight"]
+# Predictions below this threshold are treated as uncertain, not as a reliable diagnosis.
+# This reduces overconfident-looking advice, but does not repair a model trained with
+# incorrect class ordering or insufficient data.
+CONFIDENCE_THRESHOLD = 60.0
 
 RECOMMENDATIONS = {
     "Pepper Bacterial Spot": {
@@ -321,6 +325,12 @@ if uploaded_file is not None:
         pred_index = int(np.argmax(predictions))
         predicted_class = CLASS_NAMES[pred_index]
         confidence = float(predictions[pred_index]) * 100
+        top_indices = np.argsort(predictions)[::-1][:3]
+        top_predictions = [
+            (CLASS_NAMES[int(i)], float(predictions[int(i)]) * 100)
+            for i in top_indices
+        ]
+        prediction_is_reliable = confidence >= CONFIDENCE_THRESHOLD
 
         if "Healthy" not in predicted_class:
             leaf_mask, disease_mask, severity_percent = segment_leaf_and_disease(image_np)
@@ -332,11 +342,23 @@ if uploaded_file is not None:
             severity_overlay = img_resized
 
         gradcam_overlay = make_gradcam_overlay(image_np, grad_model, pred_index)
-        recommendation = RECOMMENDATIONS[predicted_class][sev_label]
+        if prediction_is_reliable:
+            recommendation = RECOMMENDATIONS[predicted_class][sev_label]
+        else:
+            recommendation = (
+                "No treatment recommendation shown because the model confidence is below "
+                f"{CONFIDENCE_THRESHOLD:.0f}%. Retake a clear, close-up photo and verify the "
+                "crop and disease with a reliable source."
+            )
 
         result = {
             "predicted_class": predicted_class,
             "confidence": round(confidence, 1),
+            "top_predictions": [
+                {"class": name, "confidence": round(score, 1)}
+                for name, score in top_predictions
+            ],
+            "prediction_status": "tentative" if not prediction_is_reliable else "model_prediction",
             "severity_percent": round(severity_percent, 1),
             "severity_label": sev_label,
             "recommendation": recommendation
@@ -361,15 +383,25 @@ if uploaded_file is not None:
     st.markdown("---")
     result_col1, result_col2 = st.columns(2)
     with result_col1:
-        st.metric("Predicted Disease", predicted_class)
+        st.metric("Model's top prediction", predicted_class)
         st.metric("Confidence", f"{confidence:.1f}%")
     with result_col2:
-        st.metric("Severity", f"{severity_percent:.1f}%", sev_label)
+        if prediction_is_reliable:
+            st.metric("Estimated severity", f"{severity_percent:.1f}%", sev_label)
+        else:
+            st.metric("Estimated severity", "Not reported", "Prediction uncertain")
 
-    if confidence < 60:
-        st.warning("⚠️ Low confidence prediction. For better accuracy, try a closer, well-lit photo of a single leaf against a plain background.")
+    st.subheader("Top 3 model predictions")
+    for class_name, class_score in top_predictions:
+        st.write(f"- **{class_name}** — {class_score:.1f}%")
 
-    if "Healthy" in predicted_class:
+    if not prediction_is_reliable:
+        st.warning(
+            f"⚠️ Uncertain result: the top prediction is only {confidence:.1f}% "
+            f"(required threshold: {CONFIDENCE_THRESHOLD:.0f}%). Do not rely on this as a "
+            "confirmed disease or crop identification. No treatment advice is provided."
+        )
+    elif "Healthy" in predicted_class:
         st.success(f"✅ {recommendation}")
     elif sev_label in ["Very Mild", "Mild"]:
         st.warning(f"⚠️ {recommendation}")
