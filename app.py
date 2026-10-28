@@ -9,95 +9,6 @@ import os
 import json
 from datetime import datetime
 
-
-# ---------------- INPUT VALIDATION: LEAF VS NON-LEAF ----------------
-# This extra ImageNet classifier helps reject obvious unrelated objects
-# (people, animals, buses, bags, buildings, etc.) before disease prediction.
-# It is a general-purpose object classifier, not a dedicated leaf detector;
-# test carefully with the leaf photos used in your project.
-from tensorflow.keras.applications import MobileNetV2 as ImageNetMobileNetV2
-from tensorflow.keras.applications.mobilenet_v2 import preprocess_input, decode_predictions
-
-@st.cache_resource
-def load_input_validator():
-    # Downloads ImageNet weights on first run if they are not cached.
-    return ImageNetMobileNetV2(weights="imagenet", include_top=True)
-
-# ImageNet labels that are commonly botanical / plant-like. This is deliberately
-# broad to reduce false rejection of leaves, but cannot guarantee perfect detection.
-PLANT_LABEL_KEYWORDS = (
-    "leaf", "plant", "pot", "bell pepper", "cabbage", "cauliflower",
-    "broccoli", "artichoke", "cardoon", "corn", "ear", "rapeseed",
-    "daisy", "flower", "fungus", "mushroom", "acorn", "buckeye",
-    "cucumber", "zucchini", "spaghetti squash", "butternut squash",
-    "pumpkin", "strawberry", "fig", "pineapple", "banana", "lemon",
-    "orange", "granny smith", "head cabbage", "greenhouse"
-)
-
-def validate_leaf_image(image_np):
-    """Return (accepted, reason). General ImageNet screening + color sanity check."""
-    if image_np is None or image_np.size == 0:
-        return False, "The image could not be read. Please upload a JPG or PNG leaf photo."
-    h, w = image_np.shape[:2]
-    if h < 80 or w < 80:
-        return False, "The image is too small. Please upload a clearer leaf photo."
-
-    # First reject obvious human faces.
-    gray = cv2.cvtColor(image_np, cv2.COLOR_RGB2GRAY)
-    try:
-        cascade_path = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
-        face_cascade = cv2.CascadeClassifier(cascade_path)
-        faces = face_cascade.detectMultiScale(
-            gray, scaleFactor=1.1, minNeighbors=5,
-            minSize=(max(35, w // 10), max(35, h // 10))
-        )
-        if len(faces) > 0:
-            return False, "A human face was detected. Please upload a potato, tomato, or pepper leaf image."
-    except Exception:
-        pass
-
-    # Classify the whole image with ImageNet before passing it to the disease model.
-    # If its top predictions are clearly unrelated to plants, reject it.
-    try:
-        validator = load_input_validator()
-        small = cv2.resize(image_np, (224, 224)).astype(np.float32)
-        batch = np.expand_dims(small, axis=0)
-        scores = validator.predict(preprocess_input(batch), verbose=0)
-        top_labels = [label.lower().replace("_", " ") for _, label, _ in decode_predictions(scores, top=5)[0]]
-        if not any(any(keyword in label for keyword in PLANT_LABEL_KEYWORDS) for label in top_labels):
-            return False, (
-                "This image does not appear to contain a plant or leaf. "
-                "Please upload a clear potato, tomato, or pepper leaf photo."
-            )
-    except Exception as exc:
-        # Do not silently claim reliable non-leaf detection if the validator cannot run.
-        return False, (
-            "The image validation model could not run. Please try again after the app "
-            "finishes loading, or contact the project administrator."
-        )
-
-    # Retain a basic color/region check as a second sanity check.
-    hsv = cv2.cvtColor(image_np, cv2.COLOR_RGB2HSV)
-    green_mask = cv2.inRange(
-        hsv, np.array([20, 25, 25], dtype=np.uint8),
-        np.array([100, 255, 255], dtype=np.uint8)
-    )
-    kernel = np.ones((5, 5), np.uint8)
-    green_mask = cv2.morphologyEx(green_mask, cv2.MORPH_CLOSE, kernel)
-    green_mask = cv2.morphologyEx(green_mask, cv2.MORPH_OPEN, kernel)
-    green_ratio = float(np.count_nonzero(green_mask)) / float(h * w)
-    contours, _ = cv2.findContours(green_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    largest_ratio = (
-        float(cv2.contourArea(max(contours, key=cv2.contourArea))) / float(h * w)
-        if contours else 0.0
-    )
-    if green_ratio < 0.025 or largest_ratio < 0.015:
-        return False, (
-            "A plant-leaf region could not be identified confidently. Please upload a close, "
-            "well-lit photo of one potato, tomato, or pepper leaf against a simple background."
-        )
-    return True, ""
-
 # ---------------- CONFIG ----------------
 MODEL_PATH = "model_mobilenet_v6.h5"
 IMG_SIZE = (224, 224)
@@ -296,59 +207,34 @@ grad_model = build_gradcam_model(model)
 uploaded_file = st.file_uploader("Upload a leaf image", type=["jpg", "jpeg", "png"])
 
 if uploaded_file is not None:
-    try:
-        image = Image.open(uploaded_file).convert("RGB")
-        image_np_original = np.array(image)
-    except Exception:
-        st.error("The uploaded file is not a valid image. Please upload a JPG or PNG leaf photo.")
-        st.stop()
+    image = Image.open(uploaded_file).convert("RGB")
+    image_np_original = np.array(image)
 
-    # Validate the image BEFORE the disease classifier runs.
-    is_leaf, validation_message = validate_leaf_image(image_np_original)
-    if not is_leaf:
-        st.error("🚫 Not a Leaf Image")
-        st.warning(validation_message)
-        st.info("Please upload a clear potato, tomato, or pepper leaf image. No disease prediction, severity, or Grad-CAM was generated.")
-        st.stop()
-
-    with st.spinner("Analyzing leaf image..."):
-        # Auto-crop only after the input passes validation.
-        image_np, was_cropped = crop_to_leaf(image_np_original)
+    with st.spinner("Analyzing..."):
+        # NEW STEP: auto-crop to leaf region before anything else
+        image_np = image_np_original
 
         img_resized = cv2.resize(image_np, IMG_SIZE)
         img_array = np.expand_dims(img_resized / 255.0, axis=0)
         predictions = model.predict(img_array, verbose=0)[0]
-
-        # The model's eight outputs are disease classes, NOT crop percentages.
-        # Keep the model's highest-scoring class as the tentative diagnosis.
         pred_index = int(np.argmax(predictions))
         predicted_class = CLASS_NAMES[pred_index]
         confidence = float(predictions[pred_index]) * 100
-        crop_name = predicted_class.split()[0]  # Potato / Tomato / Pepper
-        is_healthy = "Healthy" in predicted_class
 
-        if not is_healthy:
+        if "Healthy" not in predicted_class:
             leaf_mask, disease_mask, severity_percent = segment_leaf_and_disease(image_np)
             sev_label = severity_label(severity_percent)
-            severity_overlay = make_severity_overlay(
-                cv2.resize(image_np, IMG_SIZE),
-                cv2.resize(disease_mask, IMG_SIZE)
-            )
+            severity_overlay = make_severity_overlay(cv2.resize(image_np, IMG_SIZE), cv2.resize(disease_mask, IMG_SIZE))
         else:
             severity_percent = 0.0
-            sev_label = "No visible disease detected"
+            sev_label = "Very Mild"
             severity_overlay = img_resized
 
         gradcam_overlay = make_gradcam_overlay(image_np, grad_model, pred_index)
-        # Healthy classes use the "Very Mild" key in the existing recommendations.
-        recommendation = RECOMMENDATIONS[predicted_class][
-            "Very Mild" if is_healthy else sev_label
-        ]
+        recommendation = RECOMMENDATIONS[predicted_class][sev_label]
 
         result = {
             "predicted_class": predicted_class,
-            "crop": crop_name,
-            "health_status": "Healthy" if is_healthy else "Disease detected",
             "confidence": round(confidence, 1),
             "severity_percent": round(severity_percent, 1),
             "severity_label": sev_label,
@@ -372,43 +258,22 @@ if uploaded_file is not None:
         st.image(gradcam_overlay, caption="Grad-CAM Focus", use_container_width=True)
 
     st.markdown("---")
-    st.subheader("🌱 Crop and Health Assessment")
-
-    info_col1, info_col2, info_col3 = st.columns(3)
-    with info_col1:
-        st.metric("Detected Crop", crop_name)
-    with info_col2:
-        st.metric("Health Status", "Healthy" if is_healthy else "Disease detected")
-    with info_col3:
-        st.metric("Model Confidence", f"{confidence:.1f}%")
-
-    st.markdown(f"**Model's predicted class:** {predicted_class}")
-
-    if is_healthy:
-        st.success("No disease was predicted by the model. Specific disease treatment is not indicated by this result.")
-        st.markdown("**Care advice:** Continue regular watering, suitable nutrition, and routine monitoring. Recheck if symptoms appear.")
-        st.metric("Estimated affected area", "0.0%")
-    else:
-        st.metric("Estimated affected area (HSV-based)", f"{severity_percent:.1f}%", sev_label)
-        st.markdown("**Suggested next steps / treatment guidance**")
-        st.write(recommendation)
-        st.caption(
-            "The affected-area percentage is a rough color-based estimate, not a laboratory measurement "
-            "or a validated disease-severity score. Confirm the diagnosis before applying chemicals."
-        )
+    result_col1, result_col2 = st.columns(2)
+    with result_col1:
+        st.metric("Predicted Disease", predicted_class)
+        st.metric("Confidence", f"{confidence:.1f}%")
+    with result_col2:
+        st.metric("Severity", f"{severity_percent:.1f}%", sev_label)
 
     if confidence < 60:
-        st.warning(
-            f"⚠️ This result is uncertain (model confidence {confidence:.1f}%). "
-            "The crop or disease may be misidentified. Treat the label and any disease-specific advice "
-            "as provisional; compare with a clear leaf photo or confirm with an agriculture expert."
-        )
+        st.warning("⚠️ Low confidence prediction. For better accuracy, try a closer, well-lit photo of a single leaf against a plain background.")
+
+    if "Healthy" in predicted_class:
+        st.success(f"✅ {recommendation}")
+    elif sev_label in ["Very Mild", "Mild"]:
+        st.warning(f"⚠️ {recommendation}")
     else:
-        st.info("Confidence is the model's score for its selected class; it does not guarantee the diagnosis is correct.")
-
-    if not is_healthy:
-        st.markdown("**Important:** Follow the product label and local agricultural guidance before using any pesticide.")
-
+        st.error(f"🚨 {recommendation}")
 
 st.markdown("---")
 st.subheader("📁 Upload History")
