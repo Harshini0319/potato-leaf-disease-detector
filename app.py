@@ -244,7 +244,7 @@ if uploaded_file is not None:
 
     st.subheader("Latest Result")
 
-    if was_cropped:
+    if True:
         st.caption("The image below was automatically cropped to focus on the leaf before analysis.")
 
     col1, col2, col3, col4 = st.columns(4)
