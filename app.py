@@ -9,6 +9,92 @@ import os
 import json
 from datetime import datetime
 
+
+# ---------------- INPUT VALIDATION: LEAF VS NON-LEAF ----------------
+# This is a guard against obvious non-plant inputs, not a perfect botanical detector.
+from tensorflow.keras.applications import MobileNetV2 as ImageNetMobileNetV2
+from tensorflow.keras.applications.mobilenet_v2 import preprocess_input, decode_predictions
+import re
+
+@st.cache_resource
+def load_input_validator():
+    return ImageNetMobileNetV2(weights="imagenet", include_top=True)
+
+# Use complete phrases/word boundaries; avoid overly broad fragments such as "ear" or "pot".
+PLANT_LABEL_KEYWORDS = (
+    "leaf", "plant", "bell pepper", "cabbage", "cauliflower", "broccoli",
+    "artichoke", "cardoon", "corn", "rapeseed", "daisy", "flower",
+    "mushroom", "acorn", "buckeye", "cucumber", "zucchini", "squash",
+    "pumpkin", "strawberry", "fig", "pineapple", "banana", "lemon",
+    "orange", "granny smith", "head cabbage", "greenhouse", "pot"
+)
+
+NON_PLANT_LABEL_KEYWORDS = (
+    "person", "man", "woman", "boy", "girl", "face", "jersey", "sweatshirt",
+    "suit", "tie", "shirt", "dog", "cat", "bird", "horse", "snake", "lizard",
+    "turtle", "frog", "bear", "lion", "tiger", "elephant", "monkey", "car",
+    "bus", "truck", "bicycle", "motorcycle", "airplane", "boat", "building",
+    "computer", "keyboard", "phone", "chair", "sofa", "bottle", "cup", "bag",
+    "backpack", "shoe", "clock", "book", "ball", "toy"
+)
+
+def _has_phrase(label, phrases):
+    label = label.lower().replace("_", " ").replace(",", " ")
+    return any(re.search(r"(?<![a-z])" + re.escape(p) + r"(?![a-z])", label) for p in phrases)
+
+def validate_leaf_image(image_np):
+    """Return (accepted, reason); reject obvious people/animals/objects before disease prediction."""
+    if image_np is None or image_np.size == 0:
+        return False, "The image could not be read. Please upload a JPG or PNG leaf photo."
+    h, w = image_np.shape[:2]
+    if h < 80 or w < 80:
+        return False, "The image is too small. Please upload a clearer leaf photo."
+
+    gray = cv2.cvtColor(image_np, cv2.COLOR_RGB2GRAY)
+    try:
+        cascade_path = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+        face_cascade = cv2.CascadeClassifier(cascade_path)
+        if not face_cascade.empty():
+            faces = face_cascade.detectMultiScale(
+                gray, scaleFactor=1.1, minNeighbors=4,
+                minSize=(max(30, w // 12), max(30, h // 12))
+            )
+            if len(faces) > 0:
+                return False, "A human face was detected. Please upload a potato, tomato, or pepper leaf photo."
+    except Exception:
+        # ImageNet screening below remains active if the face detector is unavailable.
+        pass
+
+    # ImageNet is only a secondary screen. Do not use its labels as the disease model.
+    try:
+        validator = load_input_validator()
+        small = cv2.resize(image_np, (224, 224)).astype(np.float32)
+        scores = validator.predict(preprocess_input(np.expand_dims(small, axis=0)), verbose=0)
+        decoded = decode_predictions(scores, top=5)[0]
+        labels_and_scores = [(label.lower().replace("_", " "), float(score)) for _, label, score in decoded]
+        top_label, top_score = labels_and_scores[0]
+        has_plant_label = any(_has_phrase(label, PLANT_LABEL_KEYWORDS) for label, _ in labels_and_scores)
+        # Strong top-1 human/animal/object evidence should stop disease inference.
+        if top_score >= 0.18 and _has_phrase(top_label, NON_PLANT_LABEL_KEYWORDS) and not _has_phrase(top_label, PLANT_LABEL_KEYWORDS):
+            return False, "This appears to be a person, animal, or unrelated object. Please upload a potato, tomato, or pepper leaf photo."
+        # If the classifier finds no plant-like label, require a substantial green region too.
+        if not has_plant_label:
+            hsv_check = cv2.cvtColor(image_np, cv2.COLOR_RGB2HSV)
+            green = cv2.inRange(hsv_check, np.array([20, 25, 25], np.uint8), np.array([100, 255, 255], np.uint8))
+            green_ratio = float(np.count_nonzero(green)) / float(h * w)
+            if green_ratio < 0.08:
+                return False, "This image does not appear to contain a plant leaf. Please upload a clear potato, tomato, or pepper leaf photo."
+    except Exception:
+        return False, "Image validation could not run, so this image was not sent to the disease classifier. Please try again."
+
+    # Color sanity check is deliberately modest so yellow/brown diseased leaves are not rejected.
+    hsv = cv2.cvtColor(image_np, cv2.COLOR_RGB2HSV)
+    plant_mask = cv2.inRange(hsv, np.array([10, 20, 20], np.uint8), np.array([100, 255, 255], np.uint8))
+    plant_ratio = float(np.count_nonzero(plant_mask)) / float(h * w)
+    if plant_ratio < 0.025 and not any(_has_phrase(label, PLANT_LABEL_KEYWORDS) for label, _ in labels_and_scores):
+        return False, "A plant-leaf region could not be identified confidently. Please upload a clear leaf photo."
+    return True, ""
+
 # ---------------- CONFIG ----------------
 MODEL_PATH = "model_mobilenet_v6.h5"
 IMG_SIZE = (224, 224)
@@ -207,16 +293,35 @@ grad_model = build_gradcam_model(model)
 uploaded_file = st.file_uploader("Upload a leaf image", type=["jpg", "jpeg", "png"])
 
 if uploaded_file is not None:
-    image = Image.open(uploaded_file).convert("RGB")
-    image_np_original = np.array(image)
+    try:
+        image = Image.open(uploaded_file).convert("RGB")
+        image_np_original = np.array(image)
+    except Exception:
+        st.error("The uploaded file is not a valid image. Please upload a JPG or PNG leaf photo.")
+        st.stop()
 
-    with st.spinner("Analyzing..."):
-        # NEW STEP: auto-crop to leaf region before anything else
-        image_np = image_np_original
+    # Validate the image BEFORE the disease classifier runs.
+    is_leaf, validation_message = validate_leaf_image(image_np_original)
+    if not is_leaf:
+        st.error("🚫 Not a Leaf Image")
+        st.warning(validation_message)
+        st.info("Please upload a clear potato, tomato, or pepper leaf image. No disease prediction, severity, or Grad-CAM was generated.")
+        st.stop()
 
+    with st.spinner("Analyzing leaf image..."):
+        # Predict on both the original image and the optional HSV crop.
+        # Averaging the two views reduces (but cannot eliminate) crop-related errors.
+        cropped_np, crop_found = crop_to_leaf(image_np_original)
+        was_cropped = bool(crop_found)
+        image_np = cropped_np if was_cropped else image_np_original
+
+        original_resized = cv2.resize(image_np_original, IMG_SIZE)
         img_resized = cv2.resize(image_np, IMG_SIZE)
-        img_array = np.expand_dims(img_resized / 255.0, axis=0)
-        predictions = model.predict(img_array, verbose=0)[0]
+        original_batch = np.expand_dims(original_resized.astype(np.float32) / 255.0, axis=0)
+        crop_batch = np.expand_dims(img_resized.astype(np.float32) / 255.0, axis=0)
+        original_predictions = model.predict(original_batch, verbose=0)[0]
+        crop_predictions = model.predict(crop_batch, verbose=0)[0]
+        predictions = (original_predictions + crop_predictions) / 2.0 if was_cropped else original_predictions
         pred_index = int(np.argmax(predictions))
         predicted_class = CLASS_NAMES[pred_index]
         confidence = float(predictions[pred_index]) * 100
@@ -244,14 +349,14 @@ if uploaded_file is not None:
 
     st.subheader("Latest Result")
 
-    if True:
+    if was_cropped:
         st.caption("The image below was automatically cropped to focus on the leaf before analysis.")
 
     col1, col2, col3, col4 = st.columns(4)
     with col1:
         st.image(image, caption="Original Upload", use_container_width=True)
     with col2:
-        st.image(image_np, caption="Original Image (No Crop Applied)", use_container_width=True)
+        st.image(image_np, caption="Cropped to Leaf" if was_cropped else "No Crop Applied", use_container_width=True)
     with col3:
         st.image(severity_overlay, caption="Diseased Region", use_container_width=True)
     with col4:
