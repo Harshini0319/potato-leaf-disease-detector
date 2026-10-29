@@ -43,19 +43,21 @@ OBJECT_LABELS = (
     "lab coat", "uniform", "bow tie", "microphone", "tie", "trench coat", "vestment",
     "cloak", "stethoscope", "handbag", "wallet", "umbrella", "syringe", "guitar",
     "drum", "sports car", "jeep", "minibus", "moped", "streetcar", "forklift",
-    "lawn mower", "plow", "vacuum", "screen", "monitor", "reel", "wrench", "hammer"
+    "lawn mower", "plow", "vacuum", "screen", "monitor", "reel", "wrench", "hammer",
+    "scarf", "bandana", "veil", "turban", "headscarf", "shawl", "purse", "suitcase",
+    "shopping bag", "plastic bag", "toyshop"
 )
 
-# ImageNet labels that can indicate a clearly different plant/crop. They are only
-# used when the single top prediction is highly confident, not for weak top-five guesses.
 OTHER_PLANT_LABELS = (
     "daisy", "sunflower", "rose", "tulip", "orchid", "mushroom", "corn",
     "cabbage", "broccoli", "cauliflower", "cucumber", "zucchini", "pumpkin",
     "squash", "strawberry", "pineapple", "banana", "lemon", "orange",
-    "granny smith", "fig", "acorn", "rapeseed", "cardoon", "artichoke"
+    "granny smith", "fig", "acorn", "rapeseed", "cardoon", "artichoke",
+    "ear of corn", "head cabbage", "bell cote"
 )
 
 TARGET_LABELS = ("bell pepper", "pepper", "tomato", "potato", "capsicum")
+
 
 def _label_matches(label, phrases):
     normalized = label.lower().replace("_", " ").replace(",", " ")
@@ -64,8 +66,21 @@ def _label_matches(label, phrases):
         for p in phrases
     )
 
-def validate_leaf_image(image_np):
-    """Screen out obvious non-leaf images without over-rejecting supported leaves."""
+
+def _crop_model_confidence(image_np, disease_model):
+    """Return the strongest supported-crop class probability as screening evidence."""
+    if disease_model is None:
+        return None
+    try:
+        resized = cv2.resize(image_np, IMG_SIZE).astype(np.float32) / 255.0
+        probs = disease_model.predict(np.expand_dims(resized, axis=0), verbose=0)[0]
+        return float(np.max(probs))
+    except Exception:
+        return None
+
+
+def validate_leaf_image(image_np, disease_model=None):
+    """Reject obvious non-leaf inputs while avoiding brittle color-only rejection of crop leaves."""
     if image_np is None or image_np.size == 0:
         return False, "Not a Leaf Image — the image could not be read. Upload a clear leaf photo."
 
@@ -73,59 +88,60 @@ def validate_leaf_image(image_np):
     if h < 80 or w < 80:
         return False, "Not a Leaf Image — the image is too small. Upload a clear leaf photo."
 
-    # A very permissive color sanity check. It must not require a mostly green leaf:
-    # diseased, yellow, brown, and pale leaves should still pass.
-    hsv = cv2.cvtColor(image_np, cv2.COLOR_RGB2HSV)
-    plantish_mask = cv2.inRange(
-        hsv, np.array([0, 8, 12], dtype=np.uint8), np.array([110, 255, 255], dtype=np.uint8)
-    )
-    plantish_ratio = float(np.count_nonzero(plantish_mask)) / float(h * w)
-    if plantish_ratio < 0.004:
-        return False, "Not a Leaf Image — no clear leaf-like color region was found. Upload a potato, tomato, or bell pepper leaf."
+    # Do NOT reject an image only because it has little green color. Target leaves can
+    # be yellow, brown, diseased, shadowed, or pale; a color threshold caused false rejects.
 
-    # Detect visible human faces. Two frontal cascades with stricter settings reduce
-    # false positives on leaf spots/veins compared with the previous four-cascade gate.
+    crop_confidence = _crop_model_confidence(image_np, disease_model)
+
+    # Face screening: the previous 12% face-area threshold was much too high for normal
+    # photos. Try several cascades on original and enlarged grayscale images; a detected
+    # medium/large face should stop the workflow before any displayed prediction.
+    face_detections = []
     try:
         gray_original = cv2.cvtColor(image_np, cv2.COLOR_RGB2GRAY)
-        max_dim = max(gray_original.shape)
         scales = [gray_original]
-        if max_dim < 1200:
-            scale = min(1200.0 / max_dim, 2.5)
-            scales.append(cv2.resize(
-                gray_original,
-                (max(1, int(w * scale)), max(1, int(h * scale))),
-                interpolation=cv2.INTER_CUBIC
-            ))
-        cascades = (
+        max_dim = max(gray_original.shape)
+        if max_dim < 1400:
+            scale = min(1400.0 / max_dim, 3.0)
+            if scale > 1.05:
+                scales.append(cv2.resize(
+                    gray_original,
+                    (max(1, int(w * scale)), max(1, int(h * scale))),
+                    interpolation=cv2.INTER_CUBIC
+                ))
+
+        cascade_names = (
             "haarcascade_frontalface_default.xml",
+            "haarcascade_frontalface_alt.xml",
             "haarcascade_frontalface_alt2.xml",
+            "haarcascade_profileface.xml",
         )
         for gray in scales:
             gray = cv2.equalizeHist(gray)
-            for cascade_name in cascades:
+            gray_h, gray_w = gray.shape[:2]
+            for cascade_name in cascade_names:
                 cascade = cv2.CascadeClassifier(cv2.data.haarcascades + cascade_name)
                 if cascade.empty():
                     continue
                 faces = cascade.detectMultiScale(
-                    gray, scaleFactor=1.1, minNeighbors=5,
-                    minSize=(30, 30), flags=cv2.CASCADE_SCALE_IMAGE
+                    gray, scaleFactor=1.08, minNeighbors=4,
+                    minSize=(35, 35), flags=cv2.CASCADE_SCALE_IMAGE
                 )
-                # Haar cascades can mistake leaf spots/veins for faces. Reject only
-                # a large face-like region; tiny detections are common false positives
-                # on real crop leaves and must not block valid potato/tomato/pepper photos.
-                if len(faces) > 0:
-                    gray_h, gray_w = gray.shape[:2]
-                    image_area = float(gray_h * gray_w)
-                    largest_face_ratio = max((float(fw * fh) / image_area for (fx, fy, fw, fh) in faces), default=0.0)
-                    if largest_face_ratio >= 0.12:
-                        return False, "Not a Leaf Image — a human face was detected. Upload only potato, tomato, or bell pepper leaves."
+                area = float(gray_h * gray_w)
+                for (_, _, fw, fh) in faces:
+                    ratio = float(fw * fh) / area
+                    # This threshold is 1.2% (not the former 12%).
+                    if ratio >= 0.012:
+                        face_detections.append((cascade_name, ratio))
+        if face_detections:
+            return False, "Not a Leaf Image — a human face was detected. Upload only potato, tomato, or bell pepper leaves."
     except Exception:
-        # Continue to ImageNet screening if OpenCV face detection is unavailable.
+        # Continue to the independent image-label screening if face detection is unavailable.
         pass
 
-    # ImageNet is useful for rejecting obvious objects/animals, but it is NOT a
-    # trained crop validator. Use only confident top-1 results so low-confidence
-    # labels don't incorrectly reject real supported leaves.
+    # ImageNet is a broad screening model, not a crop-specific classifier. Combine its
+    # label with the crop classifier's confidence so a weak object label doesn't reject
+    # a valid crop leaf. The crop confidence is used only as screening evidence here.
     try:
         validator = load_input_validator()
         resized = cv2.resize(image_np, (224, 224)).astype(np.float32)
@@ -135,36 +151,53 @@ def validate_leaf_image(image_np):
         labels = [(label.lower().replace("_", " "), float(score)) for _, label, score in decoded]
         top_label, top_score = labels[0]
 
-        # If a crop-related ImageNet class appears with meaningful probability, keep
-        # that as positive evidence against a weaker unrelated plant guess.
+        person_animal_score = max(
+            (score for label, score in labels if _label_matches(label, PERSON_ANIMAL_LABELS)),
+            default=0.0
+        )
+        object_score = max(
+            (score for label, score in labels if _label_matches(label, OBJECT_LABELS)),
+            default=0.0
+        )
+        other_plant_score = max(
+            (score for label, score in labels if _label_matches(label, OTHER_PLANT_LABELS)),
+            default=0.0
+        )
         target_evidence = max(
             (score for label, score in labels if _label_matches(label, TARGET_LABELS)),
             default=0.0
         )
 
-        # People/animals are rejected on a confident top-1 label; face detection above
-        # is a separate safeguard. Do not reject based on weak top-5 animal guesses.
-        if _label_matches(top_label, PERSON_ANIMAL_LABELS) and top_score >= 0.25:
+        # Strong person/animal evidence takes priority. A small chance of an animal label
+        # on a leaf is not enough; the label must be reasonably confident.
+        if person_animal_score >= 0.35:
             return False, "Not a Leaf Image — the image appears to contain a person or animal."
 
-        # Objects require stronger confidence because ImageNet can assign unrelated
-        # object labels to close-up plant images.
-        if _label_matches(top_label, OBJECT_LABELS) and top_score >= 0.70:
+        # Reject recognizable non-plant objects when ImageNet sees one strongly AND the
+        # trained 8-class crop model does not give strong target-crop evidence. This helps
+        # reject bags/vehicles while reducing false rejection of genuine leaves.
+        strong_crop_evidence = crop_confidence is not None and crop_confidence >= 0.68
+        if object_score >= 0.35 and not strong_crop_evidence:
+            return False, "Not a Leaf Image — the image appears to contain an object or vehicle."
+        if top_score >= 0.82 and _label_matches(top_label, OBJECT_LABELS) and not strong_crop_evidence:
             return False, "Not a Leaf Image — the image appears to contain an object or vehicle."
 
-        # Reject another recognizable plant only when ImageNet is very confident.
-        # Never reject solely because such a label appears second/third/fourth/fifth.
-        if (
-            _label_matches(top_label, OTHER_PLANT_LABELS)
-            and top_score >= 0.80
-            and target_evidence < 0.10
-        ):
-            return False, "Not a Supported Leaf — upload only potato, tomato, or bell pepper leaves. Other crop leaves are not supported."
+        # Another plant is rejected only when the broad model strongly identifies it AND
+        # the supported-crop model does not strongly support potato/tomato/pepper classes.
+        # This avoids rejecting target leaves just because ImageNet uses a generic plant label.
+        if other_plant_score >= 0.45 and not strong_crop_evidence and target_evidence < 0.10:
+            return False, "Not a Supported Leaf — upload only potato, tomato, or bell pepper leaves. Other plant leaves are not supported."
 
-    except Exception as exc:
-        # If validator weights are unavailable, don't block all valid leaves. The
-        # color and face checks still ran; classification continues with this caveat.
-        st.warning("Advanced image screening is unavailable. Please upload only potato, tomato, or bell pepper leaves.")
+        # If the uploaded image strongly matches neither the supported-crop classifier nor
+        # any plant-like class, reject only extremely weak crop predictions. Do not apply a
+        # global high-confidence threshold: real photos of valid leaves may be low-confidence.
+        if crop_confidence is not None and crop_confidence < 0.20 and other_plant_score < 0.20:
+            return False, "Not a Supported Leaf — upload a clear potato, tomato, or bell pepper leaf."
+
+    except Exception:
+        # If ImageNet weights are not available, face screening still runs. Do not reject
+        # every upload just because a general-purpose screening model could not load.
+        st.warning("Advanced image screening is unavailable; please upload a clear supported leaf image.")
 
     return True, ""
 
@@ -374,7 +407,7 @@ if uploaded_file is not None:
         st.stop()
 
     # Validate the image BEFORE the disease classifier runs.
-    is_leaf, validation_message = validate_leaf_image(image_np_original)
+    is_leaf, validation_message = validate_leaf_image(image_np_original, model)
     if not is_leaf:
         if validation_message.startswith("Not a Supported Leaf"):
             st.error("🚫 Not a Potato/Tomato/Bell Pepper Leaf")
