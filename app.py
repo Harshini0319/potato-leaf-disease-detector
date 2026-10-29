@@ -170,21 +170,20 @@ def validate_leaf_image(image_np, disease_model=None):
 
         # Strong person/animal evidence takes priority. A small chance of an animal label
         # on a leaf is not enough; the label must be reasonably confident.
-        if person_animal_score >= 0.35:
+        if person_animal_score >= 0.25:
             return False, "Not a Leaf Image — the image appears to contain a person or animal."
 
-        # Reject recognizable non-plant objects when ImageNet sees one strongly AND the
-        # trained 8-class crop model does not give strong target-crop evidence. This helps
-        # reject bags/vehicles while reducing false rejection of genuine leaves.
-        strong_crop_evidence = crop_confidence is not None and crop_confidence >= 0.68
-        if object_score >= 0.35 and not strong_crop_evidence:
+        # Do not let a high disease-model score override a clearly recognized object.
+        # The 8-class disease model always chooses one of its crop classes, even for a
+        # backpack/person photo, so its confidence is not proof that the upload is a leaf.
+        if object_score >= 0.25:
             return False, "Not a Leaf Image — the image appears to contain an object or vehicle."
-        if top_score >= 0.82 and _label_matches(top_label, OBJECT_LABELS) and not strong_crop_evidence:
+        if top_score >= 0.70 and _label_matches(top_label, OBJECT_LABELS):
             return False, "Not a Leaf Image — the image appears to contain an object or vehicle."
 
-        # Another plant is rejected only when the broad model strongly identifies it AND
-        # the supported-crop model does not strongly support potato/tomato/pepper classes.
-        # This avoids rejecting target leaves just because ImageNet uses a generic plant label.
+        # Reject a clearly recognized unsupported plant when ImageNet gives strong evidence.
+        # Keep a moderate crop-model signal as a tie-breaker only for ambiguous generic labels.
+        strong_crop_evidence = crop_confidence is not None and crop_confidence >= 0.80
         if other_plant_score >= 0.45 and not strong_crop_evidence and target_evidence < 0.10:
             return False, "Not a Supported Leaf — upload only potato, tomato, or bell pepper leaves. Other plant leaves are not supported."
 
