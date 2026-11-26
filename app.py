@@ -73,10 +73,8 @@ DISEASE_MODEL_PATH = "model_disease_v7.h5"
 IMG_SIZE = (224, 224)
 HISTORY_DIR = "history"
 
-# Alphabetical order matching flow_from_directory on gate_data
 GATE_CLASSES = ["non_leaf", "other_plant_leaf", "supported_leaf"]
 
-# Alphabetical order matching flow_from_directory on disease_data
 CLASS_NAMES = [
     "Pepper Bacterial Spot",
     "Pepper Healthy",
@@ -158,7 +156,21 @@ def prepare_mobilenet_batch(image_np):
     preprocessed = preprocess_input(resized)
     return np.expand_dims(preprocessed, axis=0)
 
+def is_likely_screenshot(image_np):
+    h, w = image_np.shape[:2]
+    aspect = max(h / max(w, 1), w / max(h, 1))
+    if aspect > 2.2:
+        return True
+    border_left = image_np[:, 0:4, :]
+    border_right = image_np[:, -4:, :]
+    if np.std(border_left) < 4 and np.std(border_right) < 4 and np.std(image_np) > 35:
+        return True
+    return False
+
 def validate_input_image(image_np, gate_model):
+    if is_likely_screenshot(image_np):
+        return False, "Not a Leaf Image", "Please upload a direct leaf photograph (JPG/PNG), not a screenshot or screen capture."
+
     if image_np is None or image_np.size == 0:
         return False, "Not a Leaf", "The uploaded image could not be read. Please upload a valid leaf photo."
 
