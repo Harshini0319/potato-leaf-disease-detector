@@ -70,7 +70,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-MODEL_PATH = "model_mobilenet_v6.h5"
+MODEL_PATH = "model_mobilenet_v4.h5"
 IMG_SIZE = (224, 224)
 HISTORY_DIR = "history"
 CLASS_NAMES = [
@@ -465,7 +465,7 @@ if uploaded_file is not None:
         st.stop()
 
     with st.spinner("Analyzing leaf image..."):
-        image_np, was_cropped = crop_to_leaf(image_np_original)
+        image_np, was_cropped = image_np_original, False
         img_resized = cv2.resize(image_np, IMG_SIZE)
         img_array = np.expand_dims(img_resized / 255.0, axis=0)
         predictions = model.predict(img_array, verbose=0)[0]
