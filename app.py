@@ -52,12 +52,16 @@ st.markdown("""
         border-bottom: 1px solid #e5ece7;
     }
     .sev-card {
-        background: #fffbeb;
-        border: 1px solid #fde68a;
+        background: #fef3c7;
+        border: 1.5px solid #d97706;
         border-radius: 8px;
         padding: 10px;
         text-align: center;
         margin: 10px 0;
+        color: #111827 !important;
+    }
+    .sev-card div {
+        color: #111827 !important;
     }
     .grad-scale {
         height: 10px;
@@ -341,7 +345,6 @@ if uploaded_file is not None:
         base_class = CLASS_NAMES[base_idx]
         base_conf = float(predictions[base_idx])
 
-        # Only refine with potato_model when base model clearly picks a Potato class
         if "Potato" in base_class and base_conf >= 0.45:
             p_preds = potato_model.predict(img_array, verbose=0)[0]
             p_idx = int(np.argmax(p_preds))
@@ -388,9 +391,9 @@ if uploaded_file is not None:
         st.markdown(f"**Confidence :** **{confidence:.2f}%**")
         st.markdown(f"""
         <div class="sev-card">
-            <div style="font-weight:700; color:#92400e;">Severity Estimation (HSV-based)</div>
-            <div style="font-size:1.5rem; font-weight:800; color:#b45309;">{severity_percent:.1f}%</div>
-            <div style="font-weight:700; color:#78350f;">{sev_label}</div>
+            <div style="font-weight:700;">Severity Estimation (HSV-based)</div>
+            <div style="font-size:1.5rem; font-weight:800;">{severity_percent:.1f}%</div>
+            <div style="font-weight:700;">{sev_label}</div>
         </div>
         """, unsafe_allow_html=True)
         st.caption("🟢 Very Mild (< 10%)  |  🟡 Mild (10% - 25%)")
