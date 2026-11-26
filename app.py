@@ -585,4 +585,3 @@ else:
             st.write(f"**Confidence:** {entry['confidence']}%")
             st.write(f"**Severity:** {entry['severity_percent']}% ({entry['severity_label']})")
             st.write(f"**Recommendation:** {entry['recommendation']}")
-```[cite: 1, 7, 8, 9, 10]
