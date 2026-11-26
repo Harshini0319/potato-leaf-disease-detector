@@ -389,15 +389,19 @@ def load_history():
                 entries.append(json.load(f))
     return entries
 
+if "nav_page" not in st.session_state:
+    st.session_state.nav_page = "Home"
+
 with st.sidebar:
     st.markdown("### 🌿 Multi-Crop Plant Disease Detection")
     st.caption("with Severity Estimation")
-    nav_page = st.radio(
+    nav_choice = st.radio(
         "Navigation",
         ["Home", "Upload Image", "About Project", "Dataset Classes"],
-        index=0,
+        index=["Home", "Upload Image", "About Project", "Dataset Classes"].index(st.session_state.nav_page),
         label_visibility="collapsed"
     )
+    st.session_state.nav_page = nav_choice
     st.markdown("---")
     st.markdown("**Supported Crops**")
     st.markdown("🥔 **Potato**\n\n🍅 **Tomato**\n\n🫑 **Pepper**")
@@ -412,16 +416,32 @@ st.markdown("""
 model = load_model()
 grad_model = build_gradcam_model(model)
 
-if nav_page == "About Project":
-    st.subheader("About Project")
-    st.write("Classifies Potato, Tomato, and Bell Pepper leaves into 8 disease/healthy categories using MobileNetV2, HSV-based severity estimation, and Grad-CAM heatmaps.")
+if st.session_state.nav_page == "About Project":
+    st.subheader("About Project: Multi-Crop Plant Disease Detection and Severity Estimation")
+    st.write(
+        "This project classifies leaf photographs of **Potato**, **Tomato**, and **Bell Pepper** into eight disease and healthy categories, "
+        "estimates approximate affected leaf area using HSV segmentation, and generates Grad-CAM heatmaps to highlight influential image regions."
+    )
+    st.markdown("### Key Architecture & Workflow")
+    st.markdown("""
+    - **Model Progression:** Started with a custom CNN on potato leaves, expanded to eight multi-crop classes, compared ResNet50, and adopted **MobileNetV2** (224×224×3 input, GlobalAveragePooling2D, Dense 128 ReLU, Dropout 0.4, 8-class softmax) with backbone freezing followed by fine-tuning the top 30 layers.
+    - **Automatic Leaf Cropping & HSV Severity:** Uses HSV colour thresholding and morphological filtering to crop the leaf region and compute an approximate affected-area percentage (`Very Mild < 10%`, `Mild 10%–25%`, `Moderate 25%–50%`, `Severe ≥ 50%`).
+    - **Grad-CAM Explainability:** Visualizes relative spatial attention behind each prediction.
+    - **Domain Gap Finding:** Controlled PlantVillage validation accuracy (~95.17% for MobileNetV2 v6) is higher than performance on real-world-style PlantDoc test images (32/66 = 48.5% for v6), highlighting lighting, background, and framing differences between lab-style and field-style photos.
+    - **Future Scope:** Adding a dedicated input-validation model for unsupported/non-leaf images, more diverse field images, deterministic unaugmented validation splits, and expert-validated severity checks.
+    """)
     st.stop()
 
-if nav_page == "Dataset Classes":
-    st.subheader("Supported Dataset Classes")
+if st.session_state.nav_page == "Dataset Classes":
+    st.subheader("Supported Dataset Classes (8 Classes)")
     for idx, cls in enumerate(CLASS_NAMES, start=1):
         st.write(f"{idx}. **{cls}**")
     st.stop()
+
+upload_anchor = "upload-section"
+if st.session_state.nav_page == "Upload Image":
+    st.markdown(f'<div id="{upload_anchor}"></div>', unsafe_allow_html=True)
+    st.info("Upload a clear Potato, Tomato, or Bell Pepper leaf image below to run classification, HSV severity estimation, and Grad-CAM.")
 
 st.markdown('<div class="card-box"><div class="card-title">1. Upload Leaf Image</div>', unsafe_allow_html=True)
 uploaded_file = st.file_uploader("Drag and drop an image here or click to browse (JPG, PNG)", type=["jpg", "jpeg", "png"])
@@ -515,25 +535,27 @@ if uploaded_file is not None:
     else:
         st.error(f"🚨 {recommendation}")
 
-st.markdown("---")
-st.subheader("📁 Upload History")
-history_entries = load_history()
+if st.session_state.nav_page == "Home":
+    st.markdown("---")
+    st.subheader("📁 Upload History")
+    history_entries = load_history()
 
-if len(history_entries) == 0:
-    st.info("No past uploads yet. Upload a leaf image above to start building history.")
-else:
-    st.write(f"Showing {len(history_entries)} past upload(s), most recent first.")
-    for entry in history_entries:
-        ts = entry["timestamp"]
-        with st.expander(f"{entry['predicted_class']} - {entry['confidence']}% confidence - {ts}"):
-            h_col1, h_col2, h_col3 = st.columns(3)
-            with h_col1:
-                st.image(f"{HISTORY_DIR}/{ts}_original.jpg", caption="Original", use_container_width=True)
-            with h_col2:
-                st.image(f"{HISTORY_DIR}/{ts}_severity.jpg", caption="Severity", use_container_width=True)
-            with h_col3:
-                st.image(f"{HISTORY_DIR}/{ts}_gradcam.jpg", caption="Grad-CAM", use_container_width=True)
-            st.write(f"**Disease:** {entry['predicted_class']}")
-            st.write(f"**Confidence:** {entry['confidence']}%")
-            st.write(f"**Severity:** {entry['severity_percent']}% ({entry['severity_label']})")
-            st.write(f"**Recommendation:** {entry['recommendation']}")
+    if len(history_entries) == 0:
+        st.info("No past uploads yet. Upload a leaf image above to start building history.")
+    else:
+        st.write(f"Showing {len(history_entries)} past upload(s), most recent first.")
+        for entry in history_entries:
+            ts = entry["timestamp"]
+            with st.expander(f"{entry['predicted_class']} - {entry['confidence']}% confidence - {ts}"):
+                h_col1, h_col2, h_col3 = st.columns(3)
+                with h_col1:
+                    st.image(f"{HISTORY_DIR}/{ts}_original.jpg", caption="Original", use_container_width=True)
+                with h_col2:
+                    st.image(f"{HISTORY_DIR}/{ts}_severity.jpg", caption="Severity", use_container_width=True)
+                with h_col3:
+                    st.image(f"{HISTORY_DIR}/{ts}_gradcam.jpg", caption="Grad-CAM", use_container_width=True)
+                st.write(f"**Disease:** {entry['predicted_class']}")
+                st.write(f"**Confidence:** {entry['confidence']}%")
+                st.write(f"**Severity:** {entry['severity_percent']}% ({entry['severity_label']})")
+                st.write(f"**Recommendation:** {entry['recommendation']}")
+```[cite: 1, 2, 7, 9, 10]
