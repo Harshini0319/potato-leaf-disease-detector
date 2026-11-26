@@ -61,31 +61,6 @@ st.markdown("""
         text-align: center;
         margin: 10px 0;
     }
-    .prob-item {
-        margin-bottom: 7px;
-        font-size: 0.84rem;
-    }
-    .prob-top {
-        display: flex;
-        justify-content: space-between;
-        color: #1e293b;
-        margin-bottom: 2px;
-    }
-    .bar-bg {
-        width: 100%;
-        height: 9px;
-        background: #e2e8f0;
-        border-radius: 5px;
-        overflow: hidden;
-    }
-    .bar-fill {
-        height: 100%;
-        background: #1f7a43;
-        border-radius: 5px;
-    }
-    .bar-fill-top {
-        background: #dc2626;
-    }
     .grad-scale {
         height: 10px;
         border-radius: 5px;
@@ -499,7 +474,7 @@ if uploaded_file is not None:
             "recommendation": recommendation
         })
 
-    c1, c2, c3, c4 = st.columns([1.05, 1.15, 1.15, 1.25])
+    c1, c2, c3 = st.columns([1.1, 1.15, 1.25])
 
     with c1:
         st.markdown('<div class="card-box"><div class="card-title">1. Upload Leaf Image</div>', unsafe_allow_html=True)
@@ -528,29 +503,6 @@ if uploaded_file is not None:
         st.image(gradcam_overlay, caption="Grad-CAM Heatmap", use_container_width=True)
         st.markdown('<div class="grad-scale"></div>', unsafe_allow_html=True)
         st.caption("Low Attention ⬅️  ➡️ High Attention")
-        st.markdown("</div>", unsafe_allow_html=True)
-
-    with c4:
-        st.markdown('<div class="card-box"><div class="card-title">4. Additional Information</div>', unsafe_allow_html=True)
-        st.markdown("**Class Probabilities**")
-        prob_items = sorted(
-            [(CLASS_NAMES[i].replace(" ", "_"), float(predictions[i]) * 100) for i in range(len(CLASS_NAMES))],
-            key=lambda x: x[1],
-            reverse=True
-        )
-        for idx_p, (cls_label, prob_val) in enumerate(prob_items):
-            fill_cls = "bar-fill bar-fill-top" if idx_p == 0 else "bar-fill"
-            st.markdown(f"""
-            <div class="prob-item">
-                <div class="prob-top"><span>{cls_label}</span><span>{prob_val:.2f}%</span></div>
-                <div class="bar-bg"><div class="{fill_cls}" style="width:{min(prob_val, 100):.2f}%;"></div></div>
-            </div>
-            """, unsafe_allow_html=True)
-        st.markdown("---")
-        st.markdown("**Notes:**")
-        st.caption("• Severity is estimated using HSV colour segmentation.")
-        st.caption("• Grad-CAM shows regions used for prediction.")
-        st.caption("• This is an AI-based tool and may not replace expert advice.")
         st.markdown("</div>", unsafe_allow_html=True)
 
     if confidence < 60:
