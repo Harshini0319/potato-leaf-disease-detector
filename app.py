@@ -68,8 +68,10 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+# All 3 models included
 GATEKEEPER_PATH = "model_gatekeeper.h5"
 DISEASE_MODEL_PATH = "model_disease_v7.h5"
+POTATO_MODEL_PATH = "model_potato.h5"
 IMG_SIZE = (224, 224)
 HISTORY_DIR = "history"
 
@@ -84,6 +86,12 @@ CLASS_NAMES = [
     "Tomato Early Blight",
     "Tomato Healthy",
     "Tomato Late Blight"
+]
+
+POTATO_CLASSES = [
+    "Potato Early Blight",
+    "Potato Healthy",
+    "Potato Late Blight"
 ]
 
 RECOMMENDATIONS = {
@@ -141,41 +149,26 @@ os.makedirs(HISTORY_DIR, exist_ok=True)
 
 @st.cache_resource
 def load_models():
-    if not os.path.exists(GATEKEEPER_PATH):
-        st.error(f"Gatekeeper model '{GATEKEEPER_PATH}' not found.")
-        st.stop()
-    if not os.path.exists(DISEASE_MODEL_PATH):
-        st.error(f"Disease model '{DISEASE_MODEL_PATH}' not found.")
-        st.stop()
+    for path in [GATEKEEPER_PATH, DISEASE_MODEL_PATH, POTATO_MODEL_PATH]:
+        if not os.path.exists(path):
+            st.error(f"Model file '{path}' not found in repository.")
+            st.stop()
     gate_model = tf.keras.models.load_model(GATEKEEPER_PATH)
     disease_model = tf.keras.models.load_model(DISEASE_MODEL_PATH)
-    return gate_model, disease_model
+    potato_model = tf.keras.models.load_model(POTATO_MODEL_PATH)
+    return gate_model, disease_model, potato_model
 
 def prepare_mobilenet_batch(image_np):
     resized = cv2.resize(image_np, IMG_SIZE).astype(np.float32)
     preprocessed = preprocess_input(resized)
     return np.expand_dims(preprocessed, axis=0)
 
-def is_likely_screenshot(image_np):
-    h, w = image_np.shape[:2]
-    aspect = max(h / max(w, 1), w / max(h, 1))
-    if aspect > 2.2:
-        return True
-    border_left = image_np[:, 0:4, :]
-    border_right = image_np[:, -4:, :]
-    if np.std(border_left) < 4 and np.std(border_right) < 4 and np.std(image_np) > 35:
-        return True
-    return False
-
 def validate_input_image(image_np, gate_model):
-    if is_likely_screenshot(image_np):
-        return False, "Not a Leaf Image", "Please upload a direct leaf photograph (JPG/PNG), not a screenshot or screen capture."
-
     if image_np is None or image_np.size == 0:
         return False, "Not a Leaf", "The uploaded image could not be read. Please upload a valid leaf photo."
 
     h, w = image_np.shape[:2]
-    if h < 60 or w < 60:
+    if h < 40 or w < 40:
         return False, "Not a Leaf", "The image resolution is too small. Please upload a clear leaf photo."
 
     batch = prepare_mobilenet_batch(image_np)
@@ -184,9 +177,9 @@ def validate_input_image(image_np, gate_model):
     pred_label = GATE_CLASSES[pred_idx]
     supported_prob = float(probs[2])
 
-    if pred_label == "non_leaf":
-        return False, "Not a Leaf", "Not a leaf image — humans, animals, vehicles, or everyday objects are not accepted. Please upload a leaf photo."
-    if pred_label == "other_plant_leaf" or supported_prob < 0.65:
+    if pred_label == "non_leaf" and float(probs[0]) > 0.80:
+        return False, "Not a Leaf", "Not a leaf image — please upload a plant leaf photo."
+    if pred_label == "other_plant_leaf" and float(probs[1]) > 0.80 and supported_prob < 0.25:
         return False, "Not a Leaf (Unsupported Plant)", "Not a supported leaf — only Potato, Tomato, and Bell Pepper leaves are supported."
 
     return True, "", ""
@@ -300,14 +293,15 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-gate_model, disease_model = load_models()
-grad_model = build_gradcam_model(disease_model)
+gate_model, disease_model, potato_model = load_models()
+grad_disease_model = build_gradcam_model(disease_model)
+grad_potato_model = build_gradcam_model(potato_model)
 
 if st.session_state.nav_page == "About Project":
     st.subheader("About Project: Multi-Crop Plant Disease Detection and Severity Estimation")
     st.write(
-        "This system uses a two-stage MobileNetV2 deep learning pipeline: a 3-class Input Gatekeeper (`supported_leaf`, `other_plant_leaf`, `non_leaf`) "
-        "followed by an 8-class Disease Classifier trained on combined PlantVillage and PlantDoc datasets for **Potato**, **Tomato**, and **Bell Pepper**."
+        "This system uses a MobileNetV2 pipeline with an Input Gatekeeper, an 8-class Multi-Crop Disease Classifier, "
+        "and a dedicated Potato Specialist Classifier for **Potato**, **Tomato**, and **Bell Pepper** leaves."
     )
     st.stop()
 
@@ -321,7 +315,11 @@ if st.session_state.nav_page == "Upload Image":
     st.info("Upload a clear Potato, Tomato, or Bell Pepper leaf image below.")
 
 st.markdown('<div class="card-box"><div class="card-title">1. Upload Leaf Image</div>', unsafe_allow_html=True)
-uploaded_file = st.file_uploader("Drag and drop an image here or click to browse (JPG, PNG)", type=["jpg", "jpeg", "png"])
+col_up, col_mode = st.columns([2.4, 1])
+with col_up:
+    uploaded_file = st.file_uploader("Drag and drop an image here or click to browse (JPG, PNG)", type=["jpg", "jpeg", "png"])
+with col_mode:
+    crop_hint = st.selectbox("Crop Filter (Optional)", ["Auto Detect", "Potato", "Tomato / Pepper"])
 st.markdown("</div>", unsafe_allow_html=True)
 
 if uploaded_file is not None:
@@ -342,16 +340,25 @@ if uploaded_file is not None:
         img_resized = cv2.resize(image_np, IMG_SIZE)
         img_array = prepare_mobilenet_batch(image_np)
         predictions = disease_model.predict(img_array, verbose=0)[0]
+        base_idx = int(np.argmax(predictions))
+        base_class = CLASS_NAMES[base_idx]
 
-        adjusted_preds = predictions.copy()
-        for p_idx in [2, 3, 4]:
-            adjusted_preds[p_idx] *= 1.25
-        adjusted_preds = adjusted_preds / np.sum(adjusted_preds)
+        use_potato_specialist = (crop_hint == "Potato") or (
+            crop_hint == "Auto Detect" and "Potato" in base_class
+        )
 
-        pred_index = int(np.argmax(adjusted_preds))
-        predicted_class = CLASS_NAMES[pred_index]
+        if use_potato_specialist:
+            p_preds = potato_model.predict(img_array, verbose=0)[0]
+            p_idx = int(np.argmax(p_preds))
+            predicted_class = POTATO_CLASSES[p_idx]
+            confidence = float(p_preds[p_idx]) * 100
+            gradcam_overlay = make_gradcam_overlay(image_np, grad_potato_model, p_idx)
+        else:
+            predicted_class = base_class
+            confidence = float(predictions[base_idx]) * 100
+            gradcam_overlay = make_gradcam_overlay(image_np, grad_disease_model, base_idx)
+
         crop_name, disease_name = split_crop_and_disease(predicted_class)
-        confidence = float(adjusted_preds[pred_index]) * 100
 
         if "Healthy" not in predicted_class:
             _, disease_mask, severity_percent = segment_leaf_and_disease(image_np)
@@ -362,7 +369,6 @@ if uploaded_file is not None:
             sev_label = "Very Mild"
             severity_overlay = img_resized
 
-        gradcam_overlay = make_gradcam_overlay(image_np, grad_model, pred_index)
         recommendation = RECOMMENDATIONS[predicted_class][sev_label]
 
         save_to_history(img_resized, severity_overlay, gradcam_overlay, {
