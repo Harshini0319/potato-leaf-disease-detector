@@ -558,4 +558,3 @@ if st.session_state.nav_page == "Home":
                 st.write(f"**Confidence:** {entry['confidence']}%")
                 st.write(f"**Severity:** {entry['severity_percent']}% ({entry['severity_label']})")
                 st.write(f"**Recommendation:** {entry['recommendation']}")
-```[cite: 1, 2, 7, 9, 10]
