@@ -68,7 +68,6 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# All 3 models included
 GATEKEEPER_PATH = "model_gatekeeper.h5"
 DISEASE_MODEL_PATH = "model_disease_v7.h5"
 POTATO_MODEL_PATH = "model_potato.h5"
@@ -173,13 +172,15 @@ def validate_input_image(image_np, gate_model):
 
     batch = prepare_mobilenet_batch(image_np)
     probs = gate_model.predict(batch, verbose=0)[0]
-    pred_idx = int(np.argmax(probs))
-    pred_label = GATE_CLASSES[pred_idx]
+    non_leaf_prob = float(probs[0])
+    other_leaf_prob = float(probs[1])
     supported_prob = float(probs[2])
 
-    if pred_label == "non_leaf" and float(probs[0]) > 0.80:
+    if non_leaf_prob > 0.65 and supported_prob < 0.30:
         return False, "Not a Leaf", "Not a leaf image — please upload a plant leaf photo."
-    if pred_label == "other_plant_leaf" and float(probs[1]) > 0.80 and supported_prob < 0.25:
+    if other_leaf_prob > 0.50 and supported_prob < 0.45:
+        return False, "Not a Leaf (Unsupported Plant)", "Not a supported leaf — only Potato, Tomato, and Bell Pepper leaves are supported."
+    if supported_prob < 0.40:
         return False, "Not a Leaf (Unsupported Plant)", "Not a supported leaf — only Potato, Tomato, and Bell Pepper leaves are supported."
 
     return True, "", ""
@@ -301,7 +302,7 @@ if st.session_state.nav_page == "About Project":
     st.subheader("About Project: Multi-Crop Plant Disease Detection and Severity Estimation")
     st.write(
         "This system uses a MobileNetV2 pipeline with an Input Gatekeeper, an 8-class Multi-Crop Disease Classifier, "
-        "and a dedicated Potato Specialist Classifier for **Potato**, **Tomato**, and **Bell Pepper** leaves."
+        "and a Potato Specialist Classifier for **Potato**, **Tomato**, and **Bell Pepper** leaves."
     )
     st.stop()
 
@@ -315,11 +316,7 @@ if st.session_state.nav_page == "Upload Image":
     st.info("Upload a clear Potato, Tomato, or Bell Pepper leaf image below.")
 
 st.markdown('<div class="card-box"><div class="card-title">1. Upload Leaf Image</div>', unsafe_allow_html=True)
-col_up, col_mode = st.columns([2.4, 1])
-with col_up:
-    uploaded_file = st.file_uploader("Drag and drop an image here or click to browse (JPG, PNG)", type=["jpg", "jpeg", "png"])
-with col_mode:
-    crop_hint = st.selectbox("Crop Filter (Optional)", ["Auto Detect", "Potato", "Tomato / Pepper"])
+uploaded_file = st.file_uploader("Drag and drop an image here or click to browse (JPG, PNG)", type=["jpg", "jpeg", "png"])
 st.markdown("</div>", unsafe_allow_html=True)
 
 if uploaded_file is not None:
@@ -342,12 +339,10 @@ if uploaded_file is not None:
         predictions = disease_model.predict(img_array, verbose=0)[0]
         base_idx = int(np.argmax(predictions))
         base_class = CLASS_NAMES[base_idx]
+        base_conf = float(predictions[base_idx])
 
-        use_potato_specialist = (crop_hint == "Potato") or (
-            crop_hint == "Auto Detect" and "Potato" in base_class
-        )
-
-        if use_potato_specialist:
+        # Only refine with potato_model when base model clearly picks a Potato class
+        if "Potato" in base_class and base_conf >= 0.45:
             p_preds = potato_model.predict(img_array, verbose=0)[0]
             p_idx = int(np.argmax(p_preds))
             predicted_class = POTATO_CLASSES[p_idx]
@@ -355,7 +350,7 @@ if uploaded_file is not None:
             gradcam_overlay = make_gradcam_overlay(image_np, grad_potato_model, p_idx)
         else:
             predicted_class = base_class
-            confidence = float(predictions[base_idx]) * 100
+            confidence = base_conf * 100
             gradcam_overlay = make_gradcam_overlay(image_np, grad_disease_model, base_idx)
 
         crop_name, disease_name = split_crop_and_disease(predicted_class)
