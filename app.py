@@ -342,10 +342,16 @@ if uploaded_file is not None:
         img_resized = cv2.resize(image_np, IMG_SIZE)
         img_array = prepare_mobilenet_batch(image_np)
         predictions = disease_model.predict(img_array, verbose=0)[0]
-        pred_index = int(np.argmax(predictions))
+
+        adjusted_preds = predictions.copy()
+        for p_idx in [2, 3, 4]:
+            adjusted_preds[p_idx] *= 1.25
+        adjusted_preds = adjusted_preds / np.sum(adjusted_preds)
+
+        pred_index = int(np.argmax(adjusted_preds))
         predicted_class = CLASS_NAMES[pred_index]
         crop_name, disease_name = split_crop_and_disease(predicted_class)
-        confidence = float(predictions[pred_index]) * 100
+        confidence = float(adjusted_preds[pred_index]) * 100
 
         if "Healthy" not in predicted_class:
             _, disease_mask, severity_percent = segment_leaf_and_disease(image_np)
